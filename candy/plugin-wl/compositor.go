@@ -58,6 +58,20 @@ type compositorProfile struct {
 	// top of the common set (XDG_RUNTIME_DIR, WAYLAND_DISPLAY,
 	// DBUS_SESSION_BUS_ADDRESS).
 	ExtraEnv []string
+	// EnvRecover is a shell snippet that reconstructs session environment the
+	// compositor does NOT carry in its own /proc/<pid>/environ, run after the
+	// common set has been lifted and defaulted.
+	//
+	// Hyprland is what forces this to exist: it exports
+	// HYPRLAND_INSTANCE_SIGNATURE to the processes it SPAWNS, but
+	// /proc/<pid>/environ is frozen at exec time, so the signature is simply not
+	// there to lift and every hyprctl call fails with "HYPRLAND_INSTANCE_SIGNATURE
+	// not set! (is hyprland running?)". The instance directory under
+	// $XDG_RUNTIME_DIR/hypr/ is the actual source of truth. Keeping the snippet in
+	// the table row rather than branching on the compositor name is what lets a
+	// future compositor with the same problem cost one field, not one more
+	// if-statement.
+	EnvRecover string
 
 	Window     windowBackend
 	Resolution resolutionBackend
@@ -97,9 +111,17 @@ var compositorProfiles = []compositorProfile{
 		// zwlr_screencopy_manager_v1), so nothing fail-fasts. Window management and
 		// resolution prefer hyprctl: it is richer and avoids the stale-IPC-socket
 		// class of bug that affects sway's socket discovery.
-		Name:       "hyprland",
-		Process:    "Hyprland",
-		ExtraEnv:   []string{"HYPRLAND_INSTANCE_SIGNATURE"},
+		Name:     "hyprland",
+		Process:  "Hyprland",
+		ExtraEnv: []string{"HYPRLAND_INSTANCE_SIGNATURE"},
+		// Hyprland never has the signature in its own environ (see EnvRecover), so
+		// recover it from the instance directory. Newest wins, the same rule
+		// sway's socket discovery uses: a restarted compositor leaves the previous
+		// instance's directory behind, and picking the older one silently targets a
+		// dead session.
+		EnvRecover: `if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then ` +
+			`__sig=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1); ` +
+			`[ -n "$__sig" ] && export HYPRLAND_INSTANCE_SIGNATURE="$__sig"; fi; `,
 		Window:     windowHyprctl,
 		Resolution: resolutionHyprctl,
 		Pointer:    true,
@@ -173,7 +195,7 @@ func envPrelude() string {
 			}
 		}
 	}
-	return fmt.Sprintf(
+	prelude := fmt.Sprintf(
 		`for __c in %s; do __p=$(pgrep -x "$__c" 2>/dev/null | head -1); [ -n "$__p" ] && break; done; `,
 		strings.Join(procs, " "),
 	) +
@@ -181,7 +203,19 @@ func envPrelude() string {
 			`if [ -n "$__p" ] && [ -r /proc/$__p/environ ]; then eval "$(tr '\0' '\n' < /proc/$__p/environ | grep -E '^(%s)=' | sed 's/^/export /')"; fi; `,
 			strings.Join(vars, "|"),
 		) +
-		`export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"`
+		`export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"; `
+
+	// Per-profile recovery for session state that is NOT in the compositor's
+	// environ. Runs last, so it can rely on XDG_RUNTIME_DIR being set, and is
+	// guarded on the profile whose process was actually found.
+	for _, p := range compositorProfiles {
+		if p.EnvRecover == "" {
+			continue
+		}
+		prelude += fmt.Sprintf(`if [ "$__c" = %s ]; then %s fi; `,
+			shellquote.ShellQuote(p.Process), p.EnvRecover)
+	}
+	return strings.TrimSuffix(prelude, "; ")
 }
 
 // detectCompositor returns the profile of the compositor running on the venue,

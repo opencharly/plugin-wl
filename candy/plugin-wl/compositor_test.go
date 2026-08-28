@@ -95,6 +95,59 @@ func TestEnvPreludeCoversEveryProfile(t *testing.T) {
 	}
 }
 
+// A compositor that exports session state to its CHILDREN rather than carrying it
+// in its own environ cannot be served by the /proc/<pid>/environ lift alone, because
+// that environ is frozen at exec. Hyprland is the live case: without recovery every
+// hyprctl call fails with "HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland
+// running?)" even though Hyprland is running and detection has already resolved it.
+// Observed on a live nested Hyprland 0.56.2 bed before this recovery existed.
+func TestEnvPreludeRecoversHyprlandInstanceSignature(t *testing.T) {
+	hypr := profileByName(t, "hyprland")
+	if hypr.EnvRecover == "" {
+		t.Fatal("the hyprland profile declares no EnvRecover: HYPRLAND_INSTANCE_SIGNATURE " +
+			"is absent from Hyprland's own /proc/<pid>/environ, so every hypr-* method fails")
+	}
+
+	prelude := envPrelude()
+	// The recovery must be present, guarded on the detected process, and must run
+	// AFTER XDG_RUNTIME_DIR is defaulted -- it reads $XDG_RUNTIME_DIR/hypr.
+	if !strings.Contains(prelude, "HYPRLAND_INSTANCE_SIGNATURE=") {
+		t.Error("env prelude never assigns HYPRLAND_INSTANCE_SIGNATURE")
+	}
+	if !strings.Contains(prelude, `$XDG_RUNTIME_DIR/hypr`) {
+		t.Error("env prelude does not read the instance directory, the only source of the signature")
+	}
+	guard := `if [ "$__c" = 'Hyprland' ]; then`
+	if !strings.Contains(prelude, guard) {
+		t.Errorf("hyprland recovery is not guarded on the detected process; want %q", guard)
+	}
+	if strings.Index(prelude, `XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"`) >
+		strings.Index(prelude, `$XDG_RUNTIME_DIR/hypr`) {
+		t.Error("recovery runs before XDG_RUNTIME_DIR is defaulted, so it reads /hypr off an empty path")
+	}
+
+	// A profile with no recovery must emit no guard at all -- the table stays data
+	// driven, and an unrelated compositor pays nothing for Hyprland's quirk.
+	kwin := profileByName(t, "kwin")
+	if kwin.EnvRecover != "" {
+		t.Error("kwin declares an EnvRecover it does not need")
+	}
+	if strings.Contains(prelude, `if [ "$__c" = 'kwin_wayland' ]; then`) {
+		t.Error("env prelude emits an empty recovery guard for kwin")
+	}
+}
+
+func profileByName(t *testing.T, name string) compositorProfile {
+	t.Helper()
+	for _, p := range compositorProfiles {
+		if p.Name == name {
+			return p
+		}
+	}
+	t.Fatalf("no %q profile in the compositor table", name)
+	return compositorProfile{}
+}
+
 // TestHyprlandProfile pins the capability set Hyprland actually has. Unlike KWin,
 // it implements every wlroots protocol the tooling needs, so nothing must
 // fail-fast.
