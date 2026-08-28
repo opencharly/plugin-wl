@@ -2,6 +2,8 @@ package wl
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,6 +155,36 @@ func TestHyprKeywordIsNotOffered(t *testing.T) {
 	}
 	if _, ok := requiredModifiers["hypr-keyword"]; ok {
 		t.Error("hypr-keyword still declares requiredModifiers")
+	}
+}
+
+// R5 sweep: `hyprctl keyword` must not survive ANYWHERE. It is not merely
+// deprecated on a Lua-config Hyprland - it answers "keyword can't work with
+// non-legacy parsers. Use eval." and EXITS 0, so every call site reports success
+// while applying nothing. Removing the hypr-keyword method was not enough: the
+// resolution SET path shipped the same command. Measured on 0.56.2:
+//
+//	$ hyprctl keyword monitor "WAYLAND-1,1600x900,auto,1"
+//	keyword can't work with non-legacy parsers. Use eval.   # rc=0
+func TestNoHyprctlKeywordSurvives(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Match the command STRING (a Go literal opens with a quote), so the
+		// comment explaining why the command is banned does not trip the guard.
+		if strings.Contains(string(b), `"hyprctl keyword`) {
+			t.Errorf("%s still issues `hyprctl keyword`: it exits 0 without applying "+
+				"anything on a Lua-config Hyprland. Use `hyprctl eval` with an hl.* call", f)
+		}
 	}
 }
 

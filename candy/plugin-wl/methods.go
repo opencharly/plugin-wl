@@ -739,8 +739,14 @@ func wlResolution(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 	var cmd string
 	switch profile.Resolution {
 	case resolutionHyprctl:
-		cmd = fmt.Sprintf("hyprctl keyword monitor %s",
-			shellquote.ShellQuote(fmt.Sprintf("%s,%s,auto,1", output, res)))
+		// NOT `hyprctl keyword monitor ...`. On a Lua-config Hyprland (>= 0.55, so
+		// every version this profile targets) keyword answers "keyword can't work
+		// with non-legacy parsers. Use eval." AND EXITS 0 -- the resize would report
+		// success and change nothing. Measured on 0.56.2; the same defect that
+		// removed the hypr-keyword method.
+		cmd = "hyprctl eval " + shellquote.ShellQuote(fmt.Sprintf(
+			"hl.monitor({output=%s,mode=%s,position=\"auto\",scale=1})",
+			luaQuote(output), luaQuote(res)))
 	default:
 		cmd = fmt.Sprintf("wlr-randr --output %s --custom-mode %s",
 			shellquote.ShellQuote(output), shellquote.ShellQuote(res))
