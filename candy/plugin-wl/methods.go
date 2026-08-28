@@ -63,6 +63,9 @@ var requiredModifiers = map[string][]string{
 	"resolution":     {"target"},
 	"overlay-show":   {"text"},
 	"overlay-hide":   {"target"},
+	"hypr-dispatch":  {"command"},
+	"hypr-keyword":   {"target"},
+	"hypr-eval":      {"command"},
 	"sway-msg":       {"command"},
 	"sway-focus":     {"target"},
 	"sway-move":      {"target"},
@@ -139,6 +142,23 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 	case "overlay-hide":
 		return wlOverlayHide(ctx, ex, in)
 	// sway nested
+	// hypr-* : Hyprland IPC, the analogue of the sway-* family.
+	case "hypr-monitors":
+		return hyprctlJSON(ctx, ex, "monitors")
+	case "hypr-clients":
+		return hyprctlJSON(ctx, ex, "clients")
+	case "hypr-workspaces":
+		return hyprctlJSON(ctx, ex, "workspaces")
+	case "hypr-systeminfo":
+		return wlCapture(ctx, ex, "hyprctl systeminfo")
+	case "hypr-dispatch":
+		return wlCapture(ctx, ex, "hyprctl dispatch "+in.Command)
+	case "hypr-keyword":
+		return wlCapture(ctx, ex, "hyprctl keyword "+in.Target)
+	case "hypr-eval":
+		// Hyprland >= 0.55 runs a Lua config; `eval` executes a Lua expression
+		// against the live config manager (e.g. changing input.kb_layout).
+		return wlCapture(ctx, ex, "hyprctl eval "+shellquote.ShellQuote(in.Command))
 	case "sway-tree":
 		return swaymsgCapture(ctx, ex, "-t", "get_tree")
 	case "sway-workspaces":
@@ -178,7 +198,12 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 func wlStatus(ctx context.Context, ex *sdk.Executor) (string, error) {
 	var b strings.Builder
 	comp := detectCompositor(ctx, ex)
-	fmt.Fprintf(&b, "%-12s %s\n", "compositor:", comp)
+	fmt.Fprintf(&b, "%-12s %s\n", "compositor:", comp.Name)
+	// Surface the capability matrix so an operator can see WHY a method is
+	// refused without reading the plugin source.
+	fmt.Fprintf(&b, "%-12s window=%s resolution=%s pointer=%s keyboard=%s clipboard=%s\n",
+		"capability:", comp.Window, resolutionLabel(comp.Resolution),
+		yesNo(comp.Pointer), yesNo(comp.Keyboard), yesNo(comp.Clipboard))
 
 	for _, tool := range []string{"grim", "wtype", "wlrctl", "kdotool", "pixelflux-screenshot", "wl-copy", "wl-paste", "wlr-randr", "xdotool", "import", "xprop"} {
 		if ex.VenueHasTool(ctx, tool) {
@@ -213,8 +238,14 @@ func wlStatus(ctx context.Context, ex *sdk.Executor) (string, error) {
 	// wlr-randr needs the wlr-output-management protocol, which KWin does NOT
 	// implement — on KWin it HANGS forever (no reply), wedging check-live for the
 	// full deadline. Only probe it off KWin; on KWin report resolution unavailable.
-	if !gotResolution && detectCompositor(ctx, ex) != "kwin" {
-		if out, err := wlCapture(ctx, ex, "wlr-randr 2>/dev/null | head -3"); err == nil {
+	// Only probe a resolution backend the compositor actually implements: on KWin
+	// wlr-randr does not error, it BLOCKS, wedging check-live for the full deadline.
+	if res := detectCompositor(ctx, ex).Resolution; !gotResolution && res != resolutionNone {
+		probe := "wlr-randr 2>/dev/null | head -3"
+		if res == resolutionHyprctl {
+			probe = `hyprctl -j monitors | tr -d " " | grep -E '"(name|width|height)"' | head -3`
+		}
+		if out, err := wlCapture(ctx, ex, probe); err == nil {
 			if line := strings.TrimSpace(out); line != "" {
 				fmt.Fprintf(&b, "%-12s %s\n", "output:", strings.Split(line, "\n")[0])
 				gotResolution = true
@@ -243,17 +274,24 @@ func wlStatus(ctx context.Context, ex *sdk.Executor) (string, error) {
 
 // wlToplevel lists Wayland toplevel windows via wlrctl (KWin: kdotool window IDs).
 func wlToplevel(ctx context.Context, ex *sdk.Executor) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		return wlCapture(ctx, ex, "kdotool search ''")
+	case windowHyprctl:
+		return wlCapture(ctx, ex, "hyprctl -j clients")
+	default:
+		return wlCapture(ctx, ex, "wlrctl toplevel list")
 	}
-	return wlCapture(ctx, ex, "wlrctl toplevel list")
 }
 
 // wlWindows lists windows: wlrctl toplevel (compositor-agnostic) then xdotool (XWayland);
 // KWin uses kdotool window IDs.
 func wlWindows(ctx context.Context, ex *sdk.Executor) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		return wlCapture(ctx, ex, "kdotool search ''")
+	case windowHyprctl:
+		return wlCapture(ctx, ex, "hyprctl -j clients")
 	}
 	if ex.VenueRunSilent(ctx, "command -v wlrctl >/dev/null 2>&1") == nil {
 		if out, err := wlCapture(ctx, ex, "wlrctl toplevel list"); err == nil {
@@ -270,8 +308,15 @@ func wlWindows(ctx context.Context, ex *sdk.Executor) (string, error) {
 // wlGeometry gets window geometry compositor-agnostically: kdotool (KWin), the sway tree,
 // xdotool (XWayland), then wlr-randr (Wayland-native maximized fallback).
 func wlGeometry(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		return kdotoolSearchAction(ctx, ex, in.Target, "getwindowgeometry")
+	case windowHyprctl:
+		// hyprctl reports at/size per client; a jq-free filter keeps the tool set
+		// identical to every other venue command.
+		return wlCapture(ctx, ex, fmt.Sprintf(
+			`hyprctl -j clients | tr -d " " | grep -A20 %s | grep -E '"(at|size)"' | head -2`,
+			shellquote.ShellQuote(in.Target)))
 	}
 
 	if rect, err := FindWindowRect(ctx, ex, in.Target); err == nil {
@@ -367,7 +412,13 @@ func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
 		captureCmd = "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath)
 	case ex.VenueHasTool(ctx, "grim"):
-		captureCmd = "grim -o HEADLESS-1 " + shellquote.ShellQuote(screenshotVenuePath)
+		// Discover the output rather than assuming one. HEADLESS-1 is the name
+		// gst-wayland-display happens to give its own output; a nested Hyprland's
+		// is WAYLAND-1, and a real DRM head is DP-1/HDMI-A-1. Hardcoding it made
+		// grim fail everywhere except one backend.
+		captureCmd = fmt.Sprintf("grim -o %s %s",
+			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
+			shellquote.ShellQuote(screenshotVenuePath))
 	default:
 		return "", fmt.Errorf("no screenshot tool available (need pixelflux-screenshot or grim)")
 	}
@@ -390,8 +441,8 @@ func wlClipboard(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (str
 	// wl-clipboard (wl-copy/wl-paste) needs the wlr-data-control protocol, which
 	// KWin does NOT implement — on KWin these HANG forever (no reply), wedging
 	// check-live for the full deadline. Fail fast with a clear error instead.
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", fmt.Errorf("clipboard unsupported on KWin (needs wlr-data-control, which KWin does not implement)")
+	if p := detectCompositor(ctx, ex); !p.Clipboard {
+		return "", p.unsupportedErr("clipboard", "clipboard")
 	}
 	switch in.Action {
 	case "get":
@@ -420,8 +471,8 @@ func wlClipboard(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (str
 // ---------------------------------------------------------------------------
 
 func wlClick(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", errKWinPointerUnsupported("click")
+	if p := detectCompositor(ctx, ex); !p.Pointer {
+		return "", p.unsupportedErr("pointer", "click")
 	}
 	btn := wlButton(in.Button)
 	if btn == "" {
@@ -438,8 +489,8 @@ func wlClick(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 }
 
 func wlDoubleClick(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", errKWinPointerUnsupported("double-click")
+	if p := detectCompositor(ctx, ex); !p.Pointer {
+		return "", p.unsupportedErr("pointer", "double-click")
 	}
 	btn := wlButton(in.Button)
 	if btn == "" {
@@ -456,8 +507,8 @@ func wlDoubleClick(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (s
 }
 
 func wlMouse(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", errKWinPointerUnsupported("mouse")
+	if p := detectCompositor(ctx, ex); !p.Pointer {
+		return "", p.unsupportedErr("pointer", "mouse")
 	}
 	cmd := fmt.Sprintf("wlrctl pointer move -10000 -10000 && wlrctl pointer move %d %d", in.X, in.Y)
 	if _, err := wlCapture(ctx, ex, cmd); err != nil {
@@ -471,8 +522,8 @@ func wlScroll(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string
 	if err != nil {
 		return "", err
 	}
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", errKWinPointerUnsupported("scroll")
+	if p := detectCompositor(ctx, ex); !p.Pointer {
+		return "", p.unsupportedErr("pointer", "scroll")
 	}
 	amount := in.Amount
 	if amount == 0 {
@@ -507,8 +558,8 @@ func wlScroll(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string
 }
 
 func wlDrag(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", errKWinPointerUnsupported("drag")
+	if p := detectCompositor(ctx, ex); !p.Pointer {
+		return "", p.unsupportedErr("pointer", "drag")
 	}
 	var btnNum int
 	switch in.Button {
@@ -534,8 +585,8 @@ func wlDrag(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, 
 func wlType(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
 	// wtype needs zwp_virtual_keyboard_manager_v1, which KWin does NOT implement —
 	// on KWin it HANGS forever (no reply), wedging check-live. Fail fast instead.
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", fmt.Errorf("keyboard typing unsupported on KWin (needs zwp_virtual_keyboard_manager_v1, which KWin does not implement)")
+	if p := detectCompositor(ctx, ex); !p.Keyboard {
+		return "", p.unsupportedErr("keyboard", "type")
 	}
 	if _, err := wlCapture(ctx, ex, "wtype -- "+shellquote.ShellQuote(in.Text)); err != nil {
 		return "", fmt.Errorf("typing text: %w", err)
@@ -574,11 +625,17 @@ func wlKeyCombo(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (stri
 }
 
 func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		if _, err := kdotoolSearchAction(ctx, ex, in.Target, "windowactivate"); err != nil {
 			return "", fmt.Errorf("focusing window %q via kdotool: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Focused window matching %q via kdotool", in.Target), nil
+	case windowHyprctl:
+		if err := hyprctlDispatch(ctx, ex, "focuswindow", in.Target); err != nil {
+			return "", fmt.Errorf("focusing window %q via hyprctl: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Focused window matching %q via hyprctl", in.Target), nil
 	}
 	if ex.VenueRunSilent(ctx, "command -v wlrctl >/dev/null 2>&1") == nil {
 		if wlSilent(ctx, ex, "wlrctl toplevel focus "+shellquote.ShellQuote(in.Target)) == nil {
@@ -596,9 +653,15 @@ func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 }
 
 func wlClose(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		if _, err := kdotoolSearchAction(ctx, ex, in.Target, "windowclose"); err != nil {
 			return "", fmt.Errorf("closing window %q via kdotool: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Closed window matching %q", in.Target), nil
+	case windowHyprctl:
+		if err := hyprctlDispatch(ctx, ex, "closewindow", in.Target); err != nil {
+			return "", fmt.Errorf("closing window %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Closed window matching %q", in.Target), nil
 	}
@@ -609,9 +672,15 @@ func wlClose(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 }
 
 func wlFullscreen(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		if _, err := kdotoolSearchAction(ctx, ex, in.Target, "windowstate", "--toggle", "FULLSCREEN"); err != nil {
 			return "", fmt.Errorf("toggling fullscreen on %q via kdotool: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
+	case windowHyprctl:
+		if err := hyprctlDispatch(ctx, ex, "fullscreen", "1"); err != nil {
+			return "", fmt.Errorf("toggling fullscreen on %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
 	}
@@ -622,9 +691,17 @@ func wlFullscreen(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 }
 
 func wlMinimize(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
+	switch detectCompositor(ctx, ex).Window {
+	case windowKdotool:
 		if _, err := kdotoolSearchAction(ctx, ex, in.Target, "windowminimize"); err != nil {
 			return "", fmt.Errorf("toggling minimize on %q via kdotool: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Toggled minimize on window matching %q", in.Target), nil
+	case windowHyprctl:
+		// Hyprland has no minimize; moving to the special workspace is the
+		// idiomatic equivalent and is what hyprctl users script.
+		if err := hyprctlDispatch(ctx, ex, "movetoworkspacesilent", "special"); err != nil {
+			return "", fmt.Errorf("toggling minimize on %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Toggled minimize on window matching %q", in.Target), nil
 	}
@@ -645,8 +722,9 @@ func wlExec(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, 
 }
 
 func wlResolution(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	if detectCompositor(ctx, ex) == "kwin" {
-		return "", fmt.Errorf("wl resolution: not supported on KWin (kscreen-doctor has no working backend on the headless Plasma session — it hangs; tracked as its own cutover). The selkies stream resolution is set at session start, not at runtime")
+	profile := detectCompositor(ctx, ex)
+	if profile.Resolution == resolutionNone {
+		return "", profile.unsupportedErr("resolution", "resolution")
 	}
 	// in.Target carries the WxH resolution (the in-tree resolution positional).
 	res := in.Target
@@ -660,16 +738,16 @@ func wlResolution(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 	if _, err := strconv.Atoi(parts[1]); err != nil {
 		return "", fmt.Errorf("invalid height in %q: %w", res, err)
 	}
-	output := ""
-	if data, err := wlCapture(ctx, ex, "wlr-randr 2>/dev/null | head -1"); err == nil {
-		if fields := strings.Fields(strings.TrimSpace(data)); len(fields) > 0 {
-			output = fields[0]
-		}
+	output := primaryOutputName(ctx, ex)
+	var cmd string
+	switch profile.Resolution {
+	case resolutionHyprctl:
+		cmd = fmt.Sprintf("hyprctl keyword monitor %s",
+			shellquote.ShellQuote(fmt.Sprintf("%s,%s,auto,1", output, res)))
+	default:
+		cmd = fmt.Sprintf("wlr-randr --output %s --custom-mode %s",
+			shellquote.ShellQuote(output), shellquote.ShellQuote(res))
 	}
-	if output == "" {
-		output = "HEADLESS-1"
-	}
-	cmd := fmt.Sprintf("wlr-randr --output %s --custom-mode %s", shellquote.ShellQuote(output), shellquote.ShellQuote(res))
 	if _, err := wlCapture(ctx, ex, cmd); err != nil {
 		return "", fmt.Errorf("setting resolution: %w", err)
 	}
@@ -849,16 +927,9 @@ func collectSwayMatches(node *swayNode, appID string, matches *[]swayNode) {
 // Venue command helpers (over the executor reverse channel)
 // ---------------------------------------------------------------------------
 
-// wlCompositorEnvPrelude sources the RUNNING compositor's real session environment from its
-// process before applying safe fallbacks (load-bearing for KWin's random dbus-run-session
-// bus + wayland-1; a strict improvement for sway/labwc). Ported verbatim from charly/wl.go.
-const wlCompositorEnvPrelude = `for __c in kwin_wayland sway labwc; do __p=$(pgrep -x "$__c" 2>/dev/null | head -1); [ -n "$__p" ] && break; done; ` +
-	`if [ -n "$__p" ] && [ -r /proc/$__p/environ ]; then eval "$(tr '\0' '\n' < /proc/$__p/environ | grep -E '^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY|DBUS_SESSION_BUS_ADDRESS)=' | sed 's/^/export /')"; fi; ` +
-	`export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"`
-
 // wlShellCmd wraps a command with the live compositor session environment.
 func wlShellCmd(cmd string) string {
-	return fmt.Sprintf("%s && %s", wlCompositorEnvPrelude, cmd)
+	return fmt.Sprintf("%s && %s", envPrelude(), cmd)
 }
 
 // wlCapture runs a Wayland tool command on the venue (with the compositor env prelude) and
@@ -873,19 +944,17 @@ func wlSilent(ctx context.Context, ex *sdk.Executor, cmd string) error {
 	return ex.VenueRunSilent(ctx, wlShellCmd(cmd))
 }
 
-// detectCompositor reports "kwin" when KWin (KDE Plasma) is PID-present, else "wlroots"
-// (sway / labwc). The probe runs raw (no env prelude — it needs no Wayland env itself).
-func detectCompositor(ctx context.Context, ex *sdk.Executor) string {
-	if ex.VenueRunSilent(ctx, "pgrep -x kwin_wayland >/dev/null 2>&1") == nil {
-		return "kwin"
-	}
-	return "wlroots"
+// detectCompositor and the per-compositor capability table live in compositor.go.
+
+// hyprctlJSON runs `hyprctl -j <query>` on the venue and returns the raw JSON.
+func hyprctlJSON(ctx context.Context, ex *sdk.Executor, query string) (string, error) {
+	return wlCapture(ctx, ex, "hyprctl -j "+shellquote.ShellQuote(query))
 }
 
-// errKWinPointerUnsupported is returned for pointer methods on KWin (no host-safe injectable
-// virtual-pointer protocol; tracked as its own cutover).
-func errKWinPointerUnsupported(method string) error {
-	return fmt.Errorf("wl %s: pointer injection is not supported on KWin (no host-safe backend; KWin 6 removed org_kde_kwin_fake_input and the RemoteDesktop portal is approval-gated). Window management, keyboard, clipboard, and screenshots ARE supported on KWin", method)
+// hyprctlDispatch runs one `hyprctl dispatch <verb> <arg>` on the venue.
+func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, verb, arg string) error {
+	return wlSilent(ctx, ex, fmt.Sprintf("hyprctl dispatch %s %s",
+		shellquote.ShellQuote(verb), shellquote.ShellQuote(arg)))
 }
 
 // kdotoolSearchAction chains a kdotool window query with an action verb (KWin focus/close/
