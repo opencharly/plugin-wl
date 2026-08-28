@@ -188,6 +188,15 @@ func envPrelude() string {
 // falling back to the generic wlroots profile. The probe runs raw (no env
 // prelude — it needs no Wayland environment itself).
 func detectCompositor(ctx context.Context, ex *sdk.Executor) compositorProfile {
+	if !ex.VenueHasTool(ctx, "pgrep") {
+		// Detection is impossible without pgrep, and silently claiming "wlroots"
+		// would be dangerous: on a KWin venue the wlroots tools do not error, they
+		// BLOCK. Return the conservative fallback but NAME the reason so `wl: status`
+		// reports it instead of asserting a compositor it never observed.
+		p := wlrootsProfile
+		p.Name = "unknown (pgrep unavailable — install procps/procps-ng)"
+		return p
+	}
 	for _, p := range compositorProfiles {
 		if ex.VenueRunSilent(ctx, fmt.Sprintf("pgrep -x %s >/dev/null 2>&1", shellquote.ShellQuote(p.Process))) == nil {
 			return p
