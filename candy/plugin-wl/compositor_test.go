@@ -25,7 +25,7 @@ func TestSchemaCompilesAndCoversEveryMethod(t *testing.T) {
 	}
 	for _, m := range []string{
 		"hypr-monitors", "hypr-clients", "hypr-workspaces", "hypr-systeminfo",
-		"hypr-dispatch", "hypr-keyword", "hypr-eval",
+		"hypr-dispatch", "hypr-eval",
 	} {
 		if !strings.Contains(schema, `"`+m+`"`) {
 			t.Errorf("method %q is dispatched but missing from the #WlInput enum; "+
@@ -134,6 +134,25 @@ func TestEnvPreludeRecoversHyprlandInstanceSignature(t *testing.T) {
 	}
 	if strings.Contains(prelude, `if [ "$__c" = 'kwin_wayland' ]; then`) {
 		t.Error("env prelude emits an empty recovery guard for kwin")
+	}
+}
+
+// hypr-keyword must NOT come back. On a Lua-config Hyprland (>= 0.55, i.e. every
+// version this plugin targets) `hyprctl keyword` refuses with "keyword can't work
+// with non-legacy parsers. Use eval." AND EXITS 0 - so the method reported success
+// while changing nothing, which is worse than failing. hypr-eval replaces it.
+// Measured live on 0.56.2.
+func TestHyprKeywordIsNotOffered(t *testing.T) {
+	caps, err := NewMeta().Describe(context.Background(), &pb.Empty{})
+	if err != nil {
+		t.Fatalf("Describe failed: %v", err)
+	}
+	if strings.Contains(caps.GetSchemaCue(), `"hypr-keyword"`) {
+		t.Error("hypr-keyword is back in the #WlInput enum; on a Lua-config Hyprland it " +
+			"exits 0 without applying anything")
+	}
+	if _, ok := requiredModifiers["hypr-keyword"]; ok {
+		t.Error("hypr-keyword still declares requiredModifiers")
 	}
 }
 

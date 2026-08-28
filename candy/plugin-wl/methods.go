@@ -64,7 +64,6 @@ var requiredModifiers = map[string][]string{
 	"overlay-show":   {"text"},
 	"overlay-hide":   {"target"},
 	"hypr-dispatch":  {"command"},
-	"hypr-keyword":   {"target"},
 	"hypr-eval":      {"command"},
 	"sway-msg":       {"command"},
 	"sway-focus":     {"target"},
@@ -152,9 +151,9 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 	case "hypr-systeminfo":
 		return wlCapture(ctx, ex, "hyprctl systeminfo")
 	case "hypr-dispatch":
-		return wlCapture(ctx, ex, "hyprctl dispatch "+in.Command)
-	case "hypr-keyword":
-		return wlCapture(ctx, ex, "hyprctl keyword "+in.Target)
+		// in.Command is a Lua dispatcher expression, e.g. hl.dsp.window.close().
+		// Quoted as one word: it contains parentheses the shell would otherwise eat.
+		return wlCapture(ctx, ex, "hyprctl dispatch "+shellquote.ShellQuote(in.Command))
 	case "hypr-eval":
 		// Hyprland >= 0.55 runs a Lua config; `eval` executes a Lua expression
 		// against the live config manager (e.g. changing input.kb_layout).
@@ -632,10 +631,8 @@ func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		}
 		return fmt.Sprintf("Focused window matching %q via kdotool", in.Target), nil
 	case windowHyprctl:
-		if err := hyprctlDispatch(ctx, ex, "focuswindow", in.Target); err != nil {
-			return "", fmt.Errorf("focusing window %q via hyprctl: %w", in.Target, err)
-		}
-		return fmt.Sprintf("Focused window matching %q via hyprctl", in.Target), nil
+		return "", errHyprlandLuaDispatcher("focus",
+			"hl.dsp.focus takes a direction table, not a window selector")
 	}
 	if ex.VenueRunSilent(ctx, "command -v wlrctl >/dev/null 2>&1") == nil {
 		if wlSilent(ctx, ex, "wlrctl toplevel focus "+shellquote.ShellQuote(in.Target)) == nil {
@@ -660,7 +657,9 @@ func wlClose(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		}
 		return fmt.Sprintf("Closed window matching %q", in.Target), nil
 	case windowHyprctl:
-		if err := hyprctlDispatch(ctx, ex, "closewindow", in.Target); err != nil {
+		// Measured on 0.56.2: hl.dsp.window.close accepts a window selector.
+		if err := hyprctlDispatch(ctx, ex,
+			fmt.Sprintf("hl.dsp.window.close(%s)", luaQuote(in.Target))); err != nil {
 			return "", fmt.Errorf("closing window %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Closed window matching %q", in.Target), nil
@@ -679,7 +678,8 @@ func wlFullscreen(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 		}
 		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
 	case windowHyprctl:
-		if err := hyprctlDispatch(ctx, ex, "fullscreen", "1"); err != nil {
+		// Measured on 0.56.2: hl.dsp.window.fullscreen(<mode>) is accepted.
+		if err := hyprctlDispatch(ctx, ex, "hl.dsp.window.fullscreen(1)"); err != nil {
 			return "", fmt.Errorf("toggling fullscreen on %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
@@ -698,12 +698,9 @@ func wlMinimize(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (stri
 		}
 		return fmt.Sprintf("Toggled minimize on window matching %q", in.Target), nil
 	case windowHyprctl:
-		// Hyprland has no minimize; moving to the special workspace is the
-		// idiomatic equivalent and is what hyprctl users script.
-		if err := hyprctlDispatch(ctx, ex, "movetoworkspacesilent", "special"); err != nil {
-			return "", fmt.Errorf("toggling minimize on %q via hyprctl: %w", in.Target, err)
-		}
-		return fmt.Sprintf("Toggled minimize on window matching %q", in.Target), nil
+		return "", errHyprlandLuaDispatcher("minimize",
+			"Hyprland has no minimize, and hl.dsp.workspace.toggle_special resolves "+
+				"only against an existing special workspace")
 	}
 	if err := wlrctlToplevel(ctx, ex, "minimize", in.Target); err != nil {
 		return "", fmt.Errorf("toggling minimize on %q: %w", in.Target, err)
@@ -952,9 +949,40 @@ func hyprctlJSON(ctx context.Context, ex *sdk.Executor, query string) (string, e
 }
 
 // hyprctlDispatch runs one `hyprctl dispatch <verb> <arg>` on the venue.
-func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, verb, arg string) error {
-	return wlSilent(ctx, ex, fmt.Sprintf("hyprctl dispatch %s %s",
-		shellquote.ShellQuote(verb), shellquote.ShellQuote(arg)))
+// hyprctlDispatch issues a Hyprland dispatcher. Hyprland >= 0.55 replaced the
+// legacy string dispatchers with Lua: `hyprctl dispatch` wraps its argument as
+// `return hl.dispatch(<arg>)`, so the argument must be a Lua dispatcher
+// expression such as `hl.dsp.window.close("title:foo")`. The old form
+// (`hyprctl dispatch closewindow title:foo`) is rejected outright with
+// "hl.dispatch: expected a dispatcher (e.g. hl.dsp.window.close())".
+//
+// The expression is shell-quoted as a single word: it contains parentheses and
+// quotes, which an unquoted interpolation would hand to the shell.
+func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, luaExpr string) error {
+	return wlSilent(ctx, ex, "hyprctl dispatch "+shellquote.ShellQuote(luaExpr))
+}
+
+// luaQuote renders a Go string as a Lua string literal for embedding in a
+// dispatcher expression.
+func luaQuote(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
+	return `"` + r.Replace(s) + `"`
+}
+
+// errHyprlandLuaDispatcher reports a window action whose legacy string
+// dispatcher has no selector-based equivalent in Hyprland's Lua `hl.dsp`
+// namespace. Measured against 0.56.2: `hl.dsp.focus` takes a DIRECTION table
+// (`{ direction = "left" }`), not a window selector, and the special-workspace
+// move resolves only against an existing special workspace. Guessing a mapping
+// would ship an action that reports success while doing nothing.
+func errHyprlandLuaDispatcher(action, detail string) error {
+	return fmt.Errorf(
+		"wl: %s is not supported on Hyprland: %s. Hyprland >= 0.55 replaced the "+
+			"legacy string dispatchers with the Lua hl.dsp namespace, which has no "+
+			"selector-based equivalent for this action. Tracked as batch B8 "+
+			"(Hyprland Lua dispatcher migration). Use `wl: hypr-dispatch` with an "+
+			"explicit hl.dsp expression if you know the mapping for your case",
+		action, detail)
 }
 
 // kdotoolSearchAction chains a kdotool window query with an action verb (KWin focus/close/
