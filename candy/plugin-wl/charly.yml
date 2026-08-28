@@ -33,8 +33,11 @@ plugin-wl:
             providers:
                 - verb:wl
         plan:
-            - check: the wl verb dispatches through the provider registry and reports the Wayland/sway compositor status on a live desktop deployment (the out-of-process plugin verb drives the venue's compositor over the executor reverse channel)
+            - check: the wl verb dispatches through the provider registry and reports the live compositor plus its capability matrix on a running desktop deployment (the out-of-process plugin verb drives the venue's compositor over the executor reverse channel)
               id: wl-verb-dispatches
               wl: status
+              stdout:
+                - contains: 'compositor:'
+                - contains: 'capability:'
               context:
                 - runtime
