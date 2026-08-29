@@ -121,7 +121,21 @@ var compositorProfiles = []compositorProfile{
 		// dead session.
 		EnvRecover: `if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ -d "$XDG_RUNTIME_DIR/hypr" ]; then ` +
 			`__sig=$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1); ` +
-			`[ -n "$__sig" ] && export HYPRLAND_INSTANCE_SIGNATURE="$__sig"; fi; `,
+			`[ -n "$__sig" ] && export HYPRLAND_INSTANCE_SIGNATURE="$__sig"; fi; ` +
+			// NESTED COMPOSITORS: a nested Hyprland's own environ carries the
+			// PARENT's WAYLAND_DISPLAY -- the socket it connects TO, not the one it
+			// SERVES. Inheriting it points every wl: call at the parent, which is a
+			// silent wrong-target rather than an error: measured against a
+			// gst-wayland-display parent, `grim` on the inherited display returned
+			// "compositor doesn't support the screen capture protocol" while the
+			// same grim on Hyprland's own socket captured a 2.5 MB frame.
+			//
+			// hyprctl reports the socket Hyprland actually serves, so prefer it and
+			// fall back to the inherited value when it is unavailable (the
+			// non-nested case, where the two are the same anyway).
+			`__own=$(hyprctl -j instances 2>/dev/null | ` +
+			`sed -n 's/.*"wl_socket"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1); ` +
+			`[ -n "$__own" ] && export WAYLAND_DISPLAY="$__own"; `,
 		Window:     windowHyprctl,
 		Resolution: resolutionHyprctl,
 		Pointer:    true,
