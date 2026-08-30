@@ -631,8 +631,21 @@ func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		}
 		return fmt.Sprintf("Focused window matching %q via kdotool", in.Target), nil
 	case windowHyprctl:
-		return "", errHyprlandLuaDispatcher("focus",
-			"hl.dsp.focus takes a direction table, not a window selector")
+		// Measured on 0.56.2: hl.dsp.focus takes a TABLE, and that table accepts
+		// EITHER `direction` OR `window`. An earlier reading of it as
+		// direction-only was incomplete -- only `direction` had been tried.
+		// `{window = <selector>}` resolves a window and focuses it; the active
+		// window really changes (asserted by address, both directions).
+		//
+		// The key name is `window` here and `selector` in hl.dsp.window.move.
+		// They do not share one, and a wrong key returns nil SILENTLY -- the
+		// failure then surfaces a layer away as "hl.dispatch: expected a
+		// dispatcher", which names the caller rather than the bad key.
+		if err := hyprctlDispatch(ctx, ex,
+			fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(in.Target))); err != nil {
+			return "", fmt.Errorf("focusing window %q via hyprctl: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Focused window matching %q", in.Target), nil
 	}
 	if ex.VenueRunSilent(ctx, "command -v wlrctl >/dev/null 2>&1") == nil {
 		if wlSilent(ctx, ex, "wlrctl toplevel focus "+shellquote.ShellQuote(in.Target)) == nil {
@@ -657,9 +670,11 @@ func wlClose(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		}
 		return fmt.Sprintf("Closed window matching %q", in.Target), nil
 	case windowHyprctl:
-		// Measured on 0.56.2: hl.dsp.window.close accepts a window selector.
-		if err := hyprctlDispatch(ctx, ex,
-			fmt.Sprintf("hl.dsp.window.close(%s)", luaQuote(in.Target))); err != nil {
+		// hl.dsp.window.close ACCEPTS a selector argument and then IGNORES it --
+		// see hyprctlFocusThen. Passing one closed the focused window while
+		// reporting success against the named one, which is worse than an
+		// unsupported action.
+		if err := hyprctlFocusThen(ctx, ex, in.Target, "hl.dsp.window.close()"); err != nil {
 			return "", fmt.Errorf("closing window %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Closed window matching %q", in.Target), nil
@@ -678,8 +693,11 @@ func wlFullscreen(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 		}
 		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
 	case windowHyprctl:
-		// Measured on 0.56.2: hl.dsp.window.fullscreen(<mode>) is accepted.
-		if err := hyprctlDispatch(ctx, ex, "hl.dsp.window.fullscreen(1)"); err != nil {
+		// Same active-window semantics as close (see hyprctlFocusThen): the
+		// dispatcher has no selector at all, so without focusing first this
+		// fullscreened whatever happened to be focused and reported it against
+		// in.Target.
+		if err := hyprctlFocusThen(ctx, ex, in.Target, "hl.dsp.window.fullscreen(1)"); err != nil {
 			return "", fmt.Errorf("toggling fullscreen on %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Toggled fullscreen on window matching %q", in.Target), nil
@@ -698,9 +716,14 @@ func wlMinimize(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (stri
 		}
 		return fmt.Sprintf("Toggled minimize on window matching %q", in.Target), nil
 	case windowHyprctl:
-		return "", errHyprlandLuaDispatcher("minimize",
-			"Hyprland has no minimize, and hl.dsp.workspace.toggle_special resolves "+
-				"only against an existing special workspace")
+		// Hyprland has no minimize STATE. Moving the window to a special
+		// workspace is not a workaround for a missing feature -- it IS the
+		// compositor's idiom, and what every Hyprland config binds "minimize" to.
+		if err := hyprctlFocusThen(ctx, ex, in.Target, fmt.Sprintf(
+			"hl.dsp.window.move({workspace = %s})", luaQuote(hyprMinimizeWorkspace))); err != nil {
+			return "", fmt.Errorf("minimizing window %q via hyprctl: %w", in.Target, err)
+		}
+		return fmt.Sprintf("Minimized window matching %q to %s", in.Target, hyprMinimizeWorkspace), nil
 	}
 	if err := wlrctlToplevel(ctx, ex, "minimize", in.Target); err != nil {
 		return "", fmt.Errorf("toggling minimize on %q: %w", in.Target, err)
@@ -968,6 +991,34 @@ func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, luaExpr string) erro
 	return wlSilent(ctx, ex, "hyprctl dispatch "+shellquote.ShellQuote(luaExpr))
 }
 
+// hyprctlFocusThen focuses a window BY SELECTOR and then issues an action.
+//
+// Every `hl.dsp.window.*` dispatcher operates on the ACTIVE window. Some of them
+// accept a selector argument and silently ignore it, which is the dangerous
+// shape: the call returns `ok`, so the action reports success while having been
+// applied to the wrong window.
+//
+// Measured on Hyprland 0.56.2, four `foot` windows mapped:
+//
+//	focused C, then hl.dsp.window.close("initialtitle:D")  ->  C died, D survived
+//	focused A, then hl.dsp.window.move({selector="B", …})   ->  A moved, B stayed
+//
+// So the selector has to be applied by FOCUS, which does honour it — the active
+// window really changes, asserted by address in both directions. Focusing first
+// and then acting on the active window is therefore not a workaround; it is the
+// only way these dispatchers can be aimed at all.
+//
+// Focus failing is fatal rather than ignorable: continuing would apply the action
+// to whatever was focused before, which is exactly the bug this exists to prevent.
+func hyprctlFocusThen(ctx context.Context, ex *sdk.Executor, target, luaExpr string) error {
+	if err := hyprctlDispatch(ctx, ex,
+		fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(target))); err != nil {
+		return fmt.Errorf("focusing %q before the action (the action operates on the "+
+			"ACTIVE window, so an unfocused target would act on the wrong one): %w", target, err)
+	}
+	return hyprctlDispatch(ctx, ex, luaExpr)
+}
+
 // luaQuote renders a Go string as a Lua string literal for embedding in a
 // dispatcher expression.
 func luaQuote(s string) string {
@@ -975,21 +1026,13 @@ func luaQuote(s string) string {
 	return `"` + r.Replace(s) + `"`
 }
 
-// errHyprlandLuaDispatcher reports a window action whose legacy string
-// dispatcher has no selector-based equivalent in Hyprland's Lua `hl.dsp`
-// namespace. Measured against 0.56.2: `hl.dsp.focus` takes a DIRECTION table
-// (`{ direction = "left" }`), not a window selector, and the special-workspace
-// move resolves only against an existing special workspace. Guessing a mapping
-// would ship an action that reports success while doing nothing.
-func errHyprlandLuaDispatcher(action, detail string) error {
-	return fmt.Errorf(
-		"wl: %s is not supported on Hyprland: %s. Hyprland >= 0.55 replaced the "+
-			"legacy string dispatchers with the Lua hl.dsp namespace, which has no "+
-			"selector-based equivalent for this action. Tracked as batch B8 "+
-			"(Hyprland Lua dispatcher migration). Use `wl: hypr-dispatch` with an "+
-			"explicit hl.dsp expression if you know the mapping for your case",
-		action, detail)
-}
+// hyprMinimizeWorkspace is where a "minimized" window goes on Hyprland.
+//
+// A named special workspace, not the anonymous `special`, so a minimize never
+// collides with a user's own special workspace -- and so the effect is
+// observable: the name appears in hl.get_workspaces() once the first window
+// lands there, which is what a check asserts instead of absence of error.
+const hyprMinimizeWorkspace = "special:minimized"
 
 // kdotoolSearchAction chains a kdotool window query with an action verb (KWin focus/close/
 // minimize/fullscreen/geometry), operating on the first match, and returns its stdout.

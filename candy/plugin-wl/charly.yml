@@ -1,7 +1,7 @@
 version: 2026.232.0520
 plugin-wl:
     candy:
-        version: 2026.187.1200
+        version: 2026.242.0600
         description: |-
             OUT-OF-TREE charly plugin serving the `wl` live-container check verb — a standalone
             Go module (go.mod + main.go) that drives Wayland/sway desktop automation inside a
