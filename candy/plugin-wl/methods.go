@@ -146,6 +146,10 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 		return hyprctlJSON(ctx, ex, "monitors")
 	case "hypr-clients":
 		return hyprctlJSON(ctx, ex, "clients")
+	case "hypr-layers":
+		// NOT hyprctlJSON: layer-shell surfaces need the monitor geometry correlated in
+		// to say whether each one is actually on screen. See hyprland_layers.go.
+		return wlHyprLayers(ctx, ex)
 	case "hypr-workspaces":
 		return hyprctlJSON(ctx, ex, "workspaces")
 	case "hypr-systeminfo":

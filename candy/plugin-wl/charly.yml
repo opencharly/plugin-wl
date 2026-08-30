@@ -1,7 +1,7 @@
 version: 2026.232.0520
 plugin-wl:
     candy:
-        version: 2026.242.0600
+        version: 2026.242.2239
         description: |-
             OUT-OF-TREE charly plugin serving the `wl` live-container check verb — a standalone
             Go module (go.mod + main.go) that drives Wayland/sway desktop automation inside a
@@ -28,6 +28,18 @@ plugin-wl:
             was dropped; the declarative click method uses X/Y directly). The R10 consumer is
             a desktop pod bed whose check composes this plugin (the sway-browser-vnc bed's wl
             sway-tree + screenshot probes).
+            .
+            The hypr-* family covers Hyprland's IPC the way sway-* covers sway's, and
+            hypr-layers is the one method that does NOT simply forward `hyprctl -j`: it
+            correlates the layer-shell surfaces against the monitor geometry and emits a
+            tab-separated record per surface ending in onscreen/offscreen/unknown. Layer
+            surfaces are what a Quickshell/wlroots desktop's bar, launcher, OSD, wallpaper
+            and lockscreen actually ARE — none of them is a toplevel, so hypr-clients,
+            toplevel and windows are all blind to them — and a hidden bar stays MAPPED,
+            parked outside the monitor, so presence alone cannot distinguish shown from
+            hidden. Computing the verdict in the plugin keeps that geometry (scale
+            division, odd-transform axis swap) in one tested place instead of in a jq
+            incantation in every consuming bed, and needs no jq in the guest.
         plugin:
             source: github.com/opencharly/plugin-wl/candy/plugin-wl
             providers:
