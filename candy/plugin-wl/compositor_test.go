@@ -26,8 +26,8 @@ func TestSchemaCompilesAndCoversEveryMethod(t *testing.T) {
 		t.Fatal("no CUE schema served")
 	}
 	for _, m := range []string{
-		"hypr-monitors", "hypr-clients", "hypr-workspaces", "hypr-systeminfo",
-		"hypr-dispatch", "hypr-eval",
+		"hypr-monitors", "hypr-clients", "hypr-layers", "hypr-workspaces",
+		"hypr-systeminfo", "hypr-dispatch", "hypr-eval",
 	} {
 		if !strings.Contains(schema, `"`+m+`"`) {
 			t.Errorf("method %q is dispatched but missing from the #WlInput enum; "+
