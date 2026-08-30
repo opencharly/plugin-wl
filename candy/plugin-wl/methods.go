@@ -1011,12 +1011,27 @@ func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, luaExpr string) erro
 // Focus failing is fatal rather than ignorable: continuing would apply the action
 // to whatever was focused before, which is exactly the bug this exists to prevent.
 func hyprctlFocusThen(ctx context.Context, ex *sdk.Executor, target, luaExpr string) error {
-	if err := hyprctlDispatch(ctx, ex,
-		fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(target))); err != nil {
+	exprs := hyprWindowActionExprs(target, luaExpr)
+	if err := hyprctlDispatch(ctx, ex, exprs[0]); err != nil {
 		return fmt.Errorf("focusing %q before the action (the action operates on the "+
 			"ACTIVE window, so an unfocused target would act on the wrong one): %w", target, err)
 	}
-	return hyprctlDispatch(ctx, ex, luaExpr)
+	return hyprctlDispatch(ctx, ex, exprs[1])
+}
+
+// hyprWindowActionExprs returns the ordered dispatcher expressions for aiming a
+// window action at target: focus first, then the action.
+//
+// Split out from the dispatch so the ORDER and the SHAPE are assertable without a
+// live compositor. Both are load-bearing and neither is visible from the call
+// site: the action must come second, and it must carry NO selector of its own --
+// an action given one accepts it, ignores it, and hits the focused window while
+// reporting success against the named one.
+func hyprWindowActionExprs(target, action string) [2]string {
+	return [2]string{
+		fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(target)),
+		action,
+	}
 }
 
 // luaQuote renders a Go string as a Lua string literal for embedding in a
