@@ -60,7 +60,8 @@ wl-skill:
         family: check
         owner: plugin-wl
         description: |-
-            MUST be invoked before any work involving: Wayland desktop automation — the `wl:` check verb (screenshots, click/type/scroll/drag, window management, clipboard, resolution control, AT-SPI2 introspection, window geometry), its nested `wl: sway-*` / `wl: overlay-*` methods, or `wl:` declarative steps inside `check:`/`run:` blocks. Served out-of-process by `candy/plugin-wl`. Covers sway-desktop and selkies-desktop image automation on sway, labwc, AND KWin (KDE Plasma) — window management routes to wlrctl on wlroots and kdotool on KWin.
+            Wayland desktop automation — the `wl:` check verb (screenshots, click/type/scroll/drag, window management, clipboard, resolution control, AT-SPI2 introspection, window geometry), its nested `wl: sway-*` / `wl: overlay-*` methods, or `wl:` declarative steps inside `check:`/`run:` blocks. Served out-of-process by candy/plugin-wl; covers sway-desktop and selkies-desktop automation on sway, labwc, AND KWin.
+
         content: |
             # WL - Wayland Desktop Automation
 
@@ -561,9 +562,8 @@ wl-overlay-skill:
         family: check
         owner: plugin-wl
         description: |-
-            Fullscreen Wayland overlays for screen recordings via gtk4-layer-shell.
-            MUST be invoked before any work involving: the `wl: overlay-*` methods, recording
-            overlays, title cards, lower-thirds, countdowns, or fade transitions.
+            Fullscreen Wayland overlays for screen recordings via gtk4-layer-shell — the `wl: overlay-*` methods, recording overlays, title cards, lower-thirds, countdowns, or fade transitions.
+
         content: |
             # WL Overlay -- Wayland Desktop Overlays for Recording
 
