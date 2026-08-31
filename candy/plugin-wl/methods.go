@@ -736,13 +736,35 @@ func wlMinimize(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (stri
 }
 
 func wlExec(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
-	// Background the process so it doesn't block. DISPLAY=:0 for XWayland apps.
-	// Don't shellQuote — the command may contain args (e.g. "xterm -hold").
-	cmd := fmt.Sprintf("export DISPLAY=:0; %s &", in.Command)
-	if _, err := wlCapture(ctx, ex, cmd); err != nil {
+	if _, err := wlCapture(ctx, ex, wlExecCommand(in.Command)); err != nil {
 		return "", fmt.Errorf("launching %q: %w", in.Command, err)
 	}
 	return fmt.Sprintf("Launched %q", in.Command), nil
+}
+
+// wlExecCommand builds the line that launches an app and RETURNS, which is the
+// whole contract of `wl: exec` — it exists to start GUI apps that never exit.
+//
+// A trailing `&` alone does NOT achieve that. The backgrounded child INHERITS
+// stdout and stderr, so the pipe wlCapture reads stays open until the child
+// exits, and the capture blocks on a read that will never EOF. Against a real
+// desktop app the verb therefore hung for its whole deadline and then reported
+// failure for an app that had launched perfectly:
+//
+//	wl: exec: launching "foot": rpc error: code = DeadlineExceeded
+//
+// while the very next step found the window mapped. The streams must be
+// redirected so the pipe closes immediately, and setsid detaches the child from
+// the session so it survives the shell that started it — the same two things
+// upstream omarchy's own launch_app does (`setsid -f bash -c … >/dev/null 2>&1`).
+//
+// stdin is closed too: an app inheriting the capture's stdin can block on a read
+// of its own. DISPLAY=:0 stays for XWayland apps.
+//
+// The command is deliberately NOT shell-quoted — it may carry arguments, e.g.
+// "chromium --new-window".
+func wlExecCommand(command string) string {
+	return fmt.Sprintf("export DISPLAY=:0; setsid %s >/dev/null 2>&1 </dev/null &", command)
 }
 
 func wlResolution(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
