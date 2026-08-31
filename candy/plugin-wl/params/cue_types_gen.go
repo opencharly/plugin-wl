@@ -19,7 +19,8 @@ package params
 // cutover): the verb `method` enum (the former core #WlMethod, 38 methods incl. the
 // overlay-*/sway-* nested ones) plus the input/window/artifact modifiers
 // (x/y/x2/y2/button/direction/amount/target/text/key/combo/action/query/command +
-// artifact/artifact_min_bytes/artifact_min_dimensions/artifact_not_uniform).
+// artifact/artifact_min_bytes/artifact_min_dimensions/artifact_not_uniform/
+// artifact_contains_text).
 // `command` — the argv for `exec` / `sway-msg` — is ABSORBED from the former shared
 // #Op command modifier (the residual #Op `command` field is the command plugin's
 // internal rehydration target, never wl's). The step's shared modifiers stay on
@@ -86,4 +87,13 @@ type WlInput struct {
 
 	// artifact_not_uniform — assert the image is not uniformly one color.
 	ArtifactNotUniform bool `yaml:"artifact_not_uniform,omitempty" json:"artifact_not_uniform,omitempty"`
+
+	// artifact_contains_text — assert OCR reads this text out of the artifact,
+	// case-insensitively. The assertion that separates a surface MAPPED from a
+	// surface RENDERED: hypr-layers can report a layer present, sized and on
+	// screen while it draws nothing, and artifact_not_uniform passes on any
+	// wallpaper. Validated host-side by the shared sdk artifact pipeline, which
+	// needs the tesseract OCR engine on the HOST and fails loudly — never as a
+	// no-match — when the engine or its language data is absent.
+	ArtifactContainsText string `yaml:"artifact_contains_text,omitempty" json:"artifact_contains_text,omitempty"`
 }
