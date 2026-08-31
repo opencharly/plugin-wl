@@ -1,6 +1,7 @@
 package wl
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -49,5 +50,25 @@ func TestExecCommandKeepsArgumentsUnquoted(t *testing.T) {
 	got := wlExecCommand("chromium --new-window")
 	if !strings.Contains(got, "chromium --new-window") {
 		t.Errorf("exec line mangled a command with arguments:\n%s", got)
+	}
+}
+
+// wl-copy is the SAME defect class as exec: it stays alive to own the Wayland selection,
+// so an inherited stdout/stderr keeps the capture pipe open and `clipboard set` blocks for
+// its whole deadline on a copy that succeeded. Measured live as:
+//
+//	FAIL  seed the clipboard with a known token
+//	      verb "wl": rpc error: code = DeadlineExceeded
+//
+// This pins the redirect by reading the source, because the command is built inline inside
+// a switch rather than by a helper the test could call. If that line is ever refactored,
+// this test should follow it rather than be deleted — the property is what matters.
+func TestClipboardSetRedirectsSoItDoesNotBlock(t *testing.T) {
+	src, err := os.ReadFile("methods.go")
+	if err != nil {
+		t.Fatalf("read methods.go: %v", err)
+	}
+	if !strings.Contains(string(src), "| wl-copy >/dev/null 2>&1") {
+		t.Error("clipboard set does not redirect wl-copy; the capture pipe stays open and the verb blocks")
 	}
 }

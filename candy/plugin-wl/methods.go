@@ -454,7 +454,14 @@ func wlClipboard(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (str
 		if in.Text == "" {
 			return "", fmt.Errorf("text argument required for 'set' action")
 		}
-		if _, err := wlCapture(ctx, ex, fmt.Sprintf("printf '%%s' %s | wl-copy", shellquote.ShellQuote(in.Text))); err != nil {
+		// wl-copy STAYS ALIVE to own the selection — that is how the Wayland data
+		// device works, the copier serves the content until someone else claims it.
+		// So its streams must be redirected for the same reason wlExecCommand's are:
+		// an inherited stdout/stderr keeps the capture pipe open and the verb blocks
+		// for its whole deadline on a `set` that actually succeeded. Measured on a
+		// live Hyprland guest as `verb "wl": rpc error: DeadlineExceeded` from a step
+		// whose clipboard content was, in fact, set.
+		if _, err := wlCapture(ctx, ex, fmt.Sprintf("printf '%%s' %s | wl-copy >/dev/null 2>&1", shellquote.ShellQuote(in.Text))); err != nil {
 			return "", fmt.Errorf("setting clipboard: %w", err)
 		}
 		return fmt.Sprintf("Clipboard set (%d chars)", len(in.Text)), nil
