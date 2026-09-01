@@ -406,6 +406,27 @@ func wlAtspi(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 	return wlCapture(ctx, ex, wrapped)
 }
 
+// wakeOutput re-enables a compositor output that went into DPMS off (idle
+// screensaver). grim hangs forever waiting for a frame from a disabled output
+// (RCA: a VM left running long enough for the display to sleep — the compositor
+// log shows "Disabling output <name>" and hyprctl reports dpmsStatus: false —
+// and the screenshot probe then hit the never-hang bound). Re-enabling first
+// makes the capture take milliseconds. Compositor-aware: Hyprland uses the Lua
+// dispatcher (hl.dsp.dpms), wlroots uses wlr-randr.
+func wakeOutput(ctx context.Context, ex *sdk.Executor) {
+	switch detectCompositor(ctx, ex).Resolution {
+	case resolutionHyprctl:
+		// Hyprland >= 0.55: the legacy `hyprctl dispatch dpms on` argv is
+		// rejected under the Lua config manager; the Lua spelling is
+		// hl.dsp.dpms({action = "enable"}).
+		_ = wlSilent(ctx, ex, `hyprctl dispatch "hl.dsp.dpms({action = \"enable\"})"`)
+	case resolutionWlrRandr:
+		if name := primaryOutputName(ctx, ex); name != "" {
+			_ = wlSilent(ctx, ex, "wlr-randr --output "+shellquote.ShellQuote(name)+" --on")
+		}
+	}
+}
+
 // wlScreenshot captures the desktop to a venue file (pixelflux-screenshot / grim), pulls it
 // off the venue over the reverse channel (GetFile), and writes it to in.Artifact (the host
 // path) BEFORE the provider's RunArtifactValidators reads it.
@@ -419,6 +440,7 @@ func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 		// gst-wayland-display happens to give its own output; a nested Hyprland's
 		// is WAYLAND-1, and a real DRM head is DP-1/HDMI-A-1. Hardcoding it made
 		// grim fail everywhere except one backend.
+		wakeOutput(ctx, ex)
 		captureCmd = fmt.Sprintf("grim -o %s %s",
 			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
 			shellquote.ShellQuote(screenshotVenuePath))
