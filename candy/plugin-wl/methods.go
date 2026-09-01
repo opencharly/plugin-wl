@@ -406,24 +406,31 @@ func wlAtspi(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 	return wlCapture(ctx, ex, wrapped)
 }
 
+// wakeOutputCmd returns the compositor-aware command that re-enables a
+// DPMS-off output. Hyprland >= 0.55 rejects the legacy `hyprctl dispatch dpms
+// on` argv under the Lua config manager; the Lua spelling is
+// hl.dsp.dpms({action = "enable"}). wlroots uses wlr-randr.
+func wakeOutputCmd(res resolutionBackend, outputName string) string {
+	switch res {
+	case resolutionHyprctl:
+		return `hyprctl dispatch "hl.dsp.dpms({action = \"enable\"})"`
+	case resolutionWlrRandr:
+		if outputName != "" {
+			return "wlr-randr --output " + shellquote.ShellQuote(outputName) + " --on"
+		}
+	}
+	return ""
+}
+
 // wakeOutput re-enables a compositor output that went into DPMS off (idle
 // screensaver). grim hangs forever waiting for a frame from a disabled output
 // (RCA: a VM left running long enough for the display to sleep — the compositor
 // log shows "Disabling output <name>" and hyprctl reports dpmsStatus: false —
 // and the screenshot probe then hit the never-hang bound). Re-enabling first
-// makes the capture take milliseconds. Compositor-aware: Hyprland uses the Lua
-// dispatcher (hl.dsp.dpms), wlroots uses wlr-randr.
+// makes the capture take milliseconds.
 func wakeOutput(ctx context.Context, ex *sdk.Executor) {
-	switch detectCompositor(ctx, ex).Resolution {
-	case resolutionHyprctl:
-		// Hyprland >= 0.55: the legacy `hyprctl dispatch dpms on` argv is
-		// rejected under the Lua config manager; the Lua spelling is
-		// hl.dsp.dpms({action = "enable"}).
-		_ = wlSilent(ctx, ex, `hyprctl dispatch "hl.dsp.dpms({action = \"enable\"})"`)
-	case resolutionWlrRandr:
-		if name := primaryOutputName(ctx, ex); name != "" {
-			_ = wlSilent(ctx, ex, "wlr-randr --output "+shellquote.ShellQuote(name)+" --on")
-		}
+	if cmd := wakeOutputCmd(detectCompositor(ctx, ex).Resolution, primaryOutputName(ctx, ex)); cmd != "" {
+		_ = wlSilent(ctx, ex, cmd)
 	}
 }
 
