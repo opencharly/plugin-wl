@@ -202,6 +202,24 @@ func profileByName(t *testing.T, name string) compositorProfile {
 // TestHyprlandProfile pins the capability set Hyprland actually has. Unlike KWin,
 // it implements every wlroots protocol the tooling needs, so nothing must
 // fail-fast.
+// TestWakeOutputCmd proves the DPMS-wake command construction: Hyprland uses
+// the Lua dispatcher (hl.dsp.dpms({action = "enable"}) — the legacy argv is
+// rejected under the Lua config manager), wlroots uses wlr-randr. Fails without
+// the wakeOutput fix (a DPMS-off output makes grim hang forever).
+func TestWakeOutputCmd(t *testing.T) {
+	hypr := wakeOutputCmd(resolutionHyprctl, "Virtual-1")
+	if !strings.Contains(hypr, "hl.dsp.dpms") || !strings.Contains(hypr, "enable") {
+		t.Fatalf("Hyprland wake command: want the Lua dpms dispatcher, got: %s", hypr)
+	}
+	wlr := wakeOutputCmd(resolutionWlrRandr, "DP-1")
+	if !strings.Contains(wlr, "wlr-randr --output") || !strings.Contains(wlr, "--on") {
+		t.Fatalf("wlroots wake command: want wlr-randr --on, got: %s", wlr)
+	}
+	if empty := wakeOutputCmd(resolutionWlrRandr, ""); empty != "" {
+		t.Fatalf("wlroots wake with no output: want empty, got: %s", empty)
+	}
+}
+
 func TestHyprlandProfile(t *testing.T) {
 	var hypr *compositorProfile
 	for i := range compositorProfiles {
