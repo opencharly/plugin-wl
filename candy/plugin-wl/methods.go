@@ -480,9 +480,16 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 	if in.Text == "" {
 		return "", fmt.Errorf("text argument required for the 'ocr' method")
 	}
-	captureCmd, err := ocrCaptureCmd(ctx, ex)
+	captureCmd, err := ocrCaptureCmd(
+		ex.VenueHasTool(ctx, "pixelflux-screenshot"),
+		ex.VenueHasTool(ctx, "grim"),
+		primaryOutputName(ctx, ex),
+	)
 	if err != nil {
 		return "", err
+	}
+	if !ex.VenueHasTool(ctx, "pixelflux-screenshot") {
+		wakeOutput(ctx, ex)
 	}
 	if _, err := wlCapture(ctx, ex, captureCmd); err != nil {
 		return "", fmt.Errorf("capturing screenshot for ocr: %w", err)
@@ -507,17 +514,15 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 }
 
 // ocrCaptureCmd renders the venue capture command for the ocr method — the SAME
-// seam wlScreenshot uses (the pixelflux/grim switch, the output discovery, the
-// 2x scale for the OCR small-caption fix). Pure over the venue's tool probe so
-// the switch is unit-locked.
-func ocrCaptureCmd(ctx context.Context, ex *sdk.Executor) (string, error) {
+// seam wlScreenshot uses. PURE over its three inputs (the tool probes + the
+// discovered output name), so the pixelflux/grim switch is unit-locked.
+func ocrCaptureCmd(hasPixelflux, hasGrim bool, outputName string) (string, error) {
 	switch {
-	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
+	case hasPixelflux:
 		return "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath), nil
-	case ex.VenueHasTool(ctx, "grim"):
-		wakeOutput(ctx, ex)
+	case hasGrim:
 		return fmt.Sprintf("grim -s 2 -o %s %s",
-			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
+			shellquote.ShellQuote(outputName),
 			shellquote.ShellQuote(screenshotVenuePath)), nil
 	default:
 		return "", fmt.Errorf("no screenshot tool available (need pixelflux-screenshot or grim)")
