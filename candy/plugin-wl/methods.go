@@ -484,6 +484,7 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 		ex.VenueHasTool(ctx, "pixelflux-screenshot"),
 		ex.VenueHasTool(ctx, "grim"),
 		primaryOutputName(ctx, ex),
+		in.Scale,
 	)
 	if err != nil {
 		return "", err
@@ -516,12 +517,19 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 // ocrCaptureCmd renders the venue capture command for the ocr method — the SAME
 // seam wlScreenshot uses. PURE over its three inputs (the tool probes + the
 // discovered output name), so the pixelflux/grim switch is unit-locked.
-func ocrCaptureCmd(hasPixelflux, hasGrim bool, outputName string) (string, error) {
+func ocrCaptureCmd(hasPixelflux, hasGrim bool, outputName string, scale int) (string, error) {
 	switch {
 	case hasPixelflux:
 		return "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath), nil
 	case hasGrim:
-		return fmt.Sprintf("grim -s 2 -o %s %s",
+		// The upstream screen_contains used -s 2 for the SMALL captions tesseract
+		// drops at the native resolution; the large-text venues (the omarchy shell
+		// surfaces) read BEST at the native res — the scale is the authored choice.
+		scaleArg := ""
+		if scale > 0 {
+			scaleArg = fmt.Sprintf("-s %d ", scale)
+		}
+		return fmt.Sprintf("grim %s-o %s %s", scaleArg,
 			shellquote.ShellQuote(outputName),
 			shellquote.ShellQuote(screenshotVenuePath)), nil
 	default:

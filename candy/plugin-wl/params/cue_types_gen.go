@@ -50,6 +50,10 @@ type WlInput struct {
 	// text — text to type / the clipboard payload / the overlay text / the exec-adjacent text.
 	Text string `yaml:"text,omitempty" json:"text,omitempty"`
 
+	// scale — the ocr capture scale (0 = the native resolution; 2 = the upstream
+	// screen_contains small-caption fix).
+	Scale int `yaml:"scale,omitempty" json:"scale,omitempty"`
+
 	// key — a named XKB key for `key` (wtype -k).
 	KeyName string `yaml:"key,omitempty" json:"key,omitempty"`
 
