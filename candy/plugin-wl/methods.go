@@ -480,17 +480,9 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 	if in.Text == "" {
 		return "", fmt.Errorf("text argument required for the 'ocr' method")
 	}
-	var captureCmd string
-	switch {
-	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
-		captureCmd = "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath)
-	case ex.VenueHasTool(ctx, "grim"):
-		wakeOutput(ctx, ex)
-		captureCmd = fmt.Sprintf("grim -s 2 -o %s %s",
-			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
-			shellquote.ShellQuote(screenshotVenuePath))
-	default:
-		return "", fmt.Errorf("no screenshot tool available (need pixelflux-screenshot or grim)")
+	captureCmd, err := ocrCaptureCmd(ctx, ex)
+	if err != nil {
+		return "", err
 	}
 	if _, err := wlCapture(ctx, ex, captureCmd); err != nil {
 		return "", fmt.Errorf("capturing screenshot for ocr: %w", err)
@@ -512,6 +504,24 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 		return "", fmt.Errorf("ocr: the screen text does not contain %q (observed: %s)", in.Text, sdk.Preview(out))
 	}
 	return fmt.Sprintf("The screen text contains %q", in.Text), nil
+}
+
+// ocrCaptureCmd renders the venue capture command for the ocr method — the SAME
+// seam wlScreenshot uses (the pixelflux/grim switch, the output discovery, the
+// 2x scale for the OCR small-caption fix). Pure over the venue's tool probe so
+// the switch is unit-locked.
+func ocrCaptureCmd(ctx context.Context, ex *sdk.Executor) (string, error) {
+	switch {
+	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
+		return "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath), nil
+	case ex.VenueHasTool(ctx, "grim"):
+		wakeOutput(ctx, ex)
+		return fmt.Sprintf("grim -s 2 -o %s %s",
+			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
+			shellquote.ShellQuote(screenshotVenuePath)), nil
+	default:
+		return "", fmt.Errorf("no screenshot tool available (need pixelflux-screenshot or grim)")
+	}
 }
 
 // ocrContains reports whether the OCR-observed screen text contains the expected
