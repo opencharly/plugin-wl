@@ -46,6 +46,7 @@ var requiredModifiers = map[string][]string{
 	"geometry":       {"target"},
 	"atspi":          {"action"},
 	"screenshot":     {"artifact"},
+	"ocr":            {"text"},
 	"clipboard":      {"action"},
 	"click":          {"x", "y"},
 	"double-click":   {"x", "y"},
@@ -100,6 +101,8 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 		return wlAtspi(ctx, ex, in)
 	case "screenshot":
 		return wlScreenshot(ctx, ex, in)
+	case "ocr":
+		return wlOcr(ctx, ex, in)
 	case "clipboard":
 		return wlClipboard(ctx, ex, in)
 	// side-effect actions
@@ -466,6 +469,55 @@ func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 	}
 	_ = ex.VenueRunSilent(ctx, "rm -f "+shellquote.ShellQuote(screenshotVenuePath))
 	return fmt.Sprintf("Screenshot saved to %s (%d bytes)", in.Artifact, len(data)), nil
+}
+
+// wlOcr captures the screen and asserts the expected text via tesseract — the
+// charly-native equivalent of upstream omarchy's screen_contains (the
+// acceptance-test helper): the capture at 2x scale + tesseract --psm 11, the
+// small-caption fix. The optional artifact path saves the capture for the
+// media lane.
+func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
+	if in.Text == "" {
+		return "", fmt.Errorf("text argument required for the 'ocr' method")
+	}
+	var captureCmd string
+	switch {
+	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
+		captureCmd = "pixelflux-screenshot > " + shellquote.ShellQuote(screenshotVenuePath)
+	case ex.VenueHasTool(ctx, "grim"):
+		wakeOutput(ctx, ex)
+		captureCmd = fmt.Sprintf("grim -s 2 -o %s %s",
+			shellquote.ShellQuote(primaryOutputName(ctx, ex)),
+			shellquote.ShellQuote(screenshotVenuePath))
+	default:
+		return "", fmt.Errorf("no screenshot tool available (need pixelflux-screenshot or grim)")
+	}
+	if _, err := wlCapture(ctx, ex, captureCmd); err != nil {
+		return "", fmt.Errorf("capturing screenshot for ocr: %w", err)
+	}
+	defer func() { _ = ex.VenueRunSilent(ctx, "rm -f "+shellquote.ShellQuote(screenshotVenuePath)) }()
+	out, err := wlCapture(ctx, ex, "tesseract "+shellquote.ShellQuote(screenshotVenuePath)+" stdout --psm 11 2>/dev/null")
+	if err != nil {
+		return "", fmt.Errorf("ocr (tesseract): %w — is tesseract installed in the venue?", err)
+	}
+	if in.Artifact != "" {
+		data, gerr := ex.GetFile(ctx, screenshotVenuePath, false)
+		if gerr == nil {
+			if werr := os.WriteFile(in.Artifact, data, 0o644); werr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: writing the ocr capture to %s: %v\n", in.Artifact, werr)
+			}
+		}
+	}
+	if !ocrContains(out, in.Text) {
+		return "", fmt.Errorf("ocr: the screen text does not contain %q (observed: %s)", in.Text, sdk.Preview(out))
+	}
+	return fmt.Sprintf("The screen text contains %q", in.Text), nil
+}
+
+// ocrContains reports whether the OCR-observed screen text contains the expected
+// text, case-insensitively — upstream screen_contains's grep -F -i semantics.
+func ocrContains(observed, want string) bool {
+	return strings.Contains(strings.ToLower(observed), strings.ToLower(want))
 }
 
 // wlClipboard reads or writes the Wayland clipboard via wl-clipboard.
