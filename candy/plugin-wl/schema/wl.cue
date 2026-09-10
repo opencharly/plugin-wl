@@ -39,6 +39,10 @@
 	button?: string
 	// text — text to type / the clipboard payload / the overlay text / the exec-adjacent text.
 	text?: string
+	// scale is the ocr capture scale (the upstream screen_contains 2x small-caption
+	// fix). 0/absent captures at the native resolution — the large-text venues
+	// (the omarchy shell surfaces) read best there.
+	scale?: int @go(,type=int)
 	// key — a named XKB key for `key` (wtype -k).
 	key?: string @go(KeyName)
 	// combo — a key combination for `key-combo` (e.g. ctrl+shift+t).
