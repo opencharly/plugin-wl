@@ -26,7 +26,7 @@ import (
 // feed the output through the shared sdk matcher pipeline + the artifact validators
 // (screenshot). Every in-venue action (wlrctl/grim/wtype/wl-clipboard/swaymsg/kdotool/
 // python3-pyatspi/charly-overlay) runs over the host executor reverse channel
-// (sdk.Executor.RunCapture; screenshot pulls the PNG via GetFile) instead of the in-proc
+// (sdk.Executor.RunCapture; screenshot lands the PNG via sdk.LandArtifact) instead of the in-proc
 // DeployExecutor the host-side WlCmd used. The per-verb fields arrive in the step's
 // desugared plugin_input, decoded into the CUE-generated params.WlInput (#WlInput); only
 // the genuinely shared step matchers still ride the Op. The CLI-only
@@ -100,9 +100,9 @@ func dispatch(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlI
 	case "atspi":
 		return wlAtspi(ctx, ex, in)
 	case "screenshot":
-		return wlScreenshot(ctx, ex, in)
+		return wlScreenshot(ctx, ex, op, in)
 	case "ocr":
-		return wlOcr(ctx, ex, in)
+		return wlOcr(ctx, ex, op, in)
 	case "clipboard":
 		return wlClipboard(ctx, ex, in)
 	// side-effect actions
@@ -437,10 +437,10 @@ func wakeOutput(ctx context.Context, ex *sdk.Executor) {
 	}
 }
 
-// wlScreenshot captures the desktop to a venue file (pixelflux-screenshot / grim), pulls it
-// off the venue over the reverse channel (GetFile), and writes it to in.Artifact (the host
-// path) BEFORE the provider's RunArtifactValidators reads it.
-func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
+// wlScreenshot captures the desktop to a venue file (pixelflux-screenshot / grim) and lands
+// it on the host at in.Artifact through the shared sdk.LandArtifact placement (the reverse
+// channel pull + host write + the step's artifact validators) — the ONE artifact path (R3).
+func wlScreenshot(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlInput) (string, error) {
 	var captureCmd string
 	switch {
 	case ex.VenueHasTool(ctx, "pixelflux-screenshot"):
@@ -460,15 +460,15 @@ func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 	if _, err := wlCapture(ctx, ex, captureCmd); err != nil {
 		return "", fmt.Errorf("capturing screenshot: %w", err)
 	}
-	data, err := ex.GetFile(ctx, screenshotVenuePath, false)
-	if err != nil {
-		return "", fmt.Errorf("pulling screenshot: %w (file: %s)", err, screenshotVenuePath)
+	if err := sdk.LandArtifact(ctx, ex, screenshotVenuePath, in.Artifact, op); err != nil {
+		return "", fmt.Errorf("landing screenshot artifact at %s: %w", in.Artifact, err)
 	}
-	if err := os.WriteFile(in.Artifact, data, 0o644); err != nil {
-		return "", fmt.Errorf("writing screenshot to %s: %w", in.Artifact, err)
+	size := int64(0)
+	if info, statErr := os.Stat(in.Artifact); statErr == nil {
+		size = info.Size()
 	}
 	_ = ex.VenueRunSilent(ctx, "rm -f "+shellquote.ShellQuote(screenshotVenuePath))
-	return fmt.Sprintf("Screenshot saved to %s (%d bytes)", in.Artifact, len(data)), nil
+	return fmt.Sprintf("Screenshot saved to %s (%d bytes)", in.Artifact, size), nil
 }
 
 // wlOcr captures the screen and asserts the expected text via tesseract — the
@@ -476,7 +476,7 @@ func wlScreenshot(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (st
 // acceptance-test helper): the capture at 2x scale + tesseract --psm 11, the
 // small-caption fix. The optional artifact path saves the capture for the
 // media lane.
-func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, error) {
+func wlOcr(ctx context.Context, ex *sdk.Executor, op *spec.Op, in *params.WlInput) (string, error) {
 	if in.Text == "" {
 		return "", fmt.Errorf("text argument required for the 'ocr' method")
 	}
@@ -501,11 +501,13 @@ func wlOcr(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string, e
 		return "", fmt.Errorf("ocr (tesseract): %w — is tesseract installed in the venue?", err)
 	}
 	if in.Artifact != "" {
-		data, gerr := ex.GetFile(ctx, screenshotVenuePath, false)
-		if gerr == nil {
-			if werr := os.WriteFile(in.Artifact, data, 0o644); werr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: writing the ocr capture to %s: %v\n", in.Artifact, werr)
-			}
+		// Land the ocr capture through the shared placement (R3). A failed land
+		// (or a failed declared artifact validator) stays a warning — the ocr
+		// verdict is the tesseract text assertion, and the leg was best-effort
+		// before the refactor too (provider.go's verdict-time artifact gate still
+		// fails the step when a declared artifact assertion is broken).
+		if err := sdk.LandArtifact(ctx, ex, screenshotVenuePath, in.Artifact, op); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: saving the ocr capture to %s: %v\n", in.Artifact, err)
 		}
 	}
 	if !ocrContains(out, in.Text) {
