@@ -19,8 +19,9 @@ import (
 // E3b reverse channel (the executorInvoker branch in invokeVerbProvider). Because the
 // out-of-process path does NOT run a host-side matcher pipeline, this Invoke
 // OWNS the whole verdict: get the venue executor (sdk.ExecutorFromInvoke), dispatch the
-// method (RunCapture-driven; `screenshot` also GetFile-pulls the PNG to the input's
-// artifact path), then evaluate the stdout/stderr/exit_status matchers + the artifact
+// method (RunCapture-driven; `screenshot` lands its PNG at the input's artifact path
+// inside dispatch via the shared sdk.LandArtifact placement), then evaluate the
+// stdout/stderr/exit_status matchers + the artifact
 // validators itself (via the shared sdk implementation — R3), and return the wire
 // {status,message} the host decodes.
 
@@ -78,8 +79,10 @@ func (p provider) Invoke(ctx context.Context, req *pb.InvokeRequest) (*pb.Invoke
 	out, runErr := dispatch(ctx, exec, &op, &in)
 
 	// The shared exit/stdout/stderr + artifact verdict pipeline (R3). The artifact-producing
-	// method (`screenshot`) already GetFile-pulled the PNG to the input's artifact path inside
-	// dispatch, so the validators (which read the plugin input map off the op) see a real
-	// file; in.Artifact != "" gates them (a no-op otherwise).
+	// methods (`screenshot`, and the optional `ocr` capture leg) already landed their PNG at
+	// the input's artifact path inside dispatch via sdk.LandArtifact (which runs the
+	// validators itself); the gate re-checks so a step that declared artifact assertions
+	// fails the verdict even when the land was best-effort (ocr's warning-only leg).
+	// in.Artifact != "" gates it (a no-op otherwise).
 	return sdk.VerbVerdict("wl", method, out, runErr, &op, in.Artifact != "")
 }
