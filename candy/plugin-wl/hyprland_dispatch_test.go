@@ -5,61 +5,59 @@ import (
 	"testing"
 )
 
-// TestHyprlandWindowActionsAreAimedByFocus pins the one property that makes the
-// Hyprland window verbs correct, and that nothing else in the package can check.
+// TestHyprWindowActionExprCarriesSelectorInTable pins the one property that
+// makes the Hyprland window verbs aim at the RIGHT window, which nothing else in
+// the package can check.
 //
-// Every hl.dsp.window.* dispatcher operates on the ACTIVE window. Some of them
-// ACCEPT a selector argument and then ignore it, which is the dangerous shape:
-// the call returns ok, so the action reports success against a window it never
-// touched. Measured on 0.56.2 with four windows mapped:
+// `hl.dsp.window.*` takes its target in a TABLE. The POSITIONAL form
+// (`hl.dsp.window.close("initialtitle:D")`) ACCEPTS the selector and ignores it —
+// measured on 0.56.2 with two windows mapped: with the OTHER window focused, the
+// positional form closed the wrong window. An earlier reading generalized from
+// that form and applied the selector by FOCUS instead. That is both unnecessary
+// and unreliable: the TABLE form (`hl.dsp.window.close({window="class:D"})`)
+// honors the selector directly, and was measured closing only the named window
+// while the focused one survived. Focus-then-act also cannot work on a headless
+// bed, where `activewindow` is null.
 //
-//	focused C, then hl.dsp.window.close("initialtitle:D")   -> C died,  D survived
-//	focused A, then hl.dsp.window.move({selector = "B", …})  -> A moved, B stayed
+// The selector is normalized: a bare `target: foot` (what every bed authors, and
+// what the wlrctl backend matches as the app id) becomes `class:foot`, because a
+// bare string matches NOTHING in a Hyprland action table.
 //
-// So the selector has to be applied by FOCUS, and the action must carry none.
-// Both halves are asserted, because each fails differently: dropping the focus
-// aims the action at whatever was focused, and putting the selector back on the
-// action makes it silently inert again.
-//
-// This test FAILS against the pre-fix code, whose close emitted
-// `hl.dsp.window.close(<selector>)` with no focus at all.
-func TestHyprlandWindowActionsAreAimedByFocus(t *testing.T) {
-	const target = "initialtitle:cstream-focus-a"
+// This test FAILS against the pre-fix code, whose expression aimed the action by
+// a preceding focus and therefore carried no selector on the action itself.
+func TestHyprWindowActionExprCarriesSelectorInTable(t *testing.T) {
+	for _, action := range []string{"close", "fullscreen", "move"} {
+		t.Run(action, func(t *testing.T) {
+			got := hyprWindowActionExpr("omawrite", action)
 
-	for _, tc := range []struct {
-		verb   string
-		action string
-	}{
-		{"close", "hl.dsp.window.close()"},
-		{"fullscreen", "hl.dsp.window.fullscreen(1)"},
-		{"minimize", `hl.dsp.window.move({workspace = "special:minimized"})`},
-	} {
-		t.Run(tc.verb, func(t *testing.T) {
-			got := hyprWindowActionExprs(target, tc.action)
-
-			// 1. focus FIRST, and by the `window` key. `{selector=…}`, `{address=…}`
-			// and `{target=…}` all return nil from hl.dsp.focus -- silently, so the
-			// wrong key surfaces one layer away as "expected a dispatcher".
-			if !strings.HasPrefix(got[0], `hl.dsp.focus({window = "`) {
-				t.Fatalf("%s: first expression must focus the target by the `window` key, got %q",
-					tc.verb, got[0])
+			// 1. the action TABLE carries `window = "class:<target>"`.
+			wantPrefix := "hl.dsp.window." + action + `({window = "class:omawrite"`
+			if !strings.HasPrefix(got, wantPrefix) {
+				t.Fatalf("%s: expression must aim the action by the table's `window` key with the bare target normalized to class:, got %q", action, got)
 			}
-			if !strings.Contains(got[0], target) {
-				t.Fatalf("%s: focus expression does not carry the target: %q", tc.verb, got[0])
-			}
-
-			// 2. the ACTION must carry no selector. This is the half that fails
-			// against the old code, and the failure it prevents is invisible at
-			// runtime: the action succeeds, on the wrong window.
-			if strings.Contains(got[1], target) {
-				t.Fatalf("%s: the action carries a selector (%q). Hyprland ACCEPTS it and "+
-					"IGNORES it, so the action would hit the focused window while reporting "+
-					"success against %q", tc.verb, got[1], target)
-			}
-			if got[1] != tc.action {
-				t.Fatalf("%s: action expression rewritten: want %q, got %q", tc.verb, tc.action, got[1])
+			// 2. it must NOT be the positional form, which silently ignores the selector.
+			if strings.Contains(got, `(`+`"`) {
+				t.Fatalf("%s: expression used the positional form, whose selector Hyprland ignores: %q", action, got)
 			}
 		})
+	}
+}
+
+// TestHyprSelectorNormalization pins the bare-target → class: normalization and
+// the pass-through of an explicit selector. Without the first, an authored
+// `target: foot` silently does nothing on Hyprland while working on sway/labwc;
+// without the second, a bed's explicit `initialtitle:`/`address:` is corrupted.
+func TestHyprSelectorNormalization(t *testing.T) {
+	if got := hyprSelector("foot"); got != "class:foot" {
+		t.Fatalf("bare target must normalize to class:, got %q", got)
+	}
+	for _, explicit := range []string{
+		"class:foot", "initialclass:foot", "title:foo", "initialtitle:foo",
+		"address:0xabc", "regex:foo", "pid:123",
+	} {
+		if got := hyprSelector(explicit); got != explicit {
+			t.Fatalf("explicit selector %q must pass through unchanged, got %q", explicit, got)
+		}
 	}
 }
 
