@@ -61,6 +61,44 @@ func TestHyprSelectorNormalization(t *testing.T) {
 	}
 }
 
+// TestHyprDispatchOutcome pins the stdout contract that makes the window verbs
+// trustworthy on Hyprland.
+//
+// `hyprctl dispatch` exits 0 whether the dispatch worked or not — it writes
+// `ok` on success and `error: …` / `warning: …` on failure to STDOUT, and an
+// unresolvable selector (the exact bug this PR fixes) produces
+// `warning: hl.focus: window not found` with exit 0. A caller that trusted the
+// exit status reported "Closed window matching X" for a window that was still
+// open. This classifier is the whole fix: exactly `ok` is success, anything
+// else — including an empty body — is a failure. Measured live on 0.56.2.
+func TestHyprDispatchOutcome(t *testing.T) {
+	cases := []struct {
+		name    string
+		out     string
+		wantErr bool
+	}{
+		{"clean ok", "ok\n", false},
+		{"ok without trailing newline", "ok", false},
+		{"ok with surrounding whitespace", "  ok  \n", false},
+		{"focus window-not-found (the RCA case)", "warning: =[C]:-1: hl.focus: window not found\n", true},
+		{"error line", "error: =[C]:-1: hl.window.fullscreen: invalid mode \"2\" (expected fullscreen/maximized)\n", true},
+		{"dispatcher error", "error: return hl.dispatch(...):1: hl.dispatch: expected a dispatcher (e.g. hl.dsp.window.close())\n", true},
+		{"empty body", "", true},
+		{"whitespace-only body", "  \n\t", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := hyprDispatchOutcome(tc.out)
+			if tc.wantErr && err == nil {
+				t.Fatalf("hyprDispatchOutcome(%q) = nil, want an error", tc.out)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("hyprDispatchOutcome(%q) = %v, want nil", tc.out, err)
+			}
+		})
+	}
+}
+
 // TestHyprMinimizeWorkspaceIsNamed pins the minimize destination.
 //
 // Hyprland has no minimize state; a special workspace is the compositor's idiom

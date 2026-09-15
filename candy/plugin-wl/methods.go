@@ -1120,44 +1120,48 @@ func hyprctlJSON(ctx context.Context, ex *sdk.Executor, query string) (string, e
 	return wlCapture(ctx, ex, "hyprctl -j "+shellquote.ShellQuote(query))
 }
 
-// hyprctlDispatch runs one `hyprctl dispatch <verb> <arg>` on the venue.
-// hyprctlDispatch issues a Hyprland dispatcher. Hyprland >= 0.55 replaced the
-// legacy string dispatchers with Lua: `hyprctl dispatch` wraps its argument as
-// `return hl.dispatch(<arg>)`, so the argument must be a Lua dispatcher
-// expression such as `hl.dsp.window.close({window="class:foo"})`. The old form
+// hyprctlDispatchChecked runs one `hyprctl dispatch <verb> <arg>` on the venue
+// and FAILS on the errors Hyprland reports on STDOUT with exit status 0.
+//
+// Hyprland >= 0.55 replaced the legacy string dispatchers with Lua: `hyprctl
+// dispatch` wraps its argument as `return hl.dispatch(<arg>)`, so the argument
+// must be a Lua dispatcher expression such as
+// `hl.dsp.window.close({window="class:foo"})`. The old form
 // (`hyprctl dispatch closewindow title:foo`) is rejected outright with
 // "hl.dispatch: expected a dispatcher (e.g. hl.dsp.window.close())".
 //
 // The expression is shell-quoted as a single word: it contains parentheses and
 // quotes, which an unquoted interpolation would hand to the shell.
-func hyprctlDispatch(ctx context.Context, ex *sdk.Executor, luaExpr string) error {
-	return wlSilent(ctx, ex, "hyprctl dispatch "+shellquote.ShellQuote(luaExpr))
-}
-
-// hyprctlDispatchChecked runs a dispatcher and FAILS on the errors Hyprland
-// reports on STDOUT with exit status 0.
 //
 // `hyprctl` is exit-code-useless for dispatches: an unresolvable selector, a
 // bad key, or an invalid argument all print `error: …` / `warning: …` to STDOUT
 // and still exit 0 (measured on 0.56.2). A caller that trusts the exit status
 // therefore reports success for an action that never happened — the exact
 // false-success shape the window verbs must not have, because the reported
-// "Closed window matching X" would name a window that is still open.
-//
-// A clean dispatch prints exactly `ok`. Anything else on stdout is a failure.
+// "Closed window matching X" would name a window that is still open. The stdout
+// contract (exactly `ok` == success) is enforced by hyprDispatchOutcome.
 func hyprctlDispatchChecked(ctx context.Context, ex *sdk.Executor, luaExpr string) error {
 	out, err := wlCapture(ctx, ex, "hyprctl dispatch "+shellquote.ShellQuote(luaExpr))
 	if err != nil {
 		return err
 	}
+	return hyprDispatchOutcome(out)
+}
+
+// hyprDispatchOutcome classifies a `hyprctl dispatch` stdout body into success
+// or failure. It is the ENTIRE "silent dispatch" fix, split out as a pure
+// function so the failure path is unit-tested rather than asserted: a clean
+// dispatch prints exactly `ok`; anything else — an `error:`/`warning:` line, or
+// an empty body — is a failure. Hyprland writes those diagnostics to stdout and
+// still exits 0, so this is the only signal that distinguishes a real action
+// from a no-op.
+func hyprDispatchOutcome(out string) error {
 	trimmed := strings.TrimSpace(out)
-	// `ok` is the one success token. Hyprland prints either `ok`, or one-or-more
-	// `error: …` / `warning: …` lines; an empty body is also not a success.
 	if trimmed == "ok" {
 		return nil
 	}
 	if trimmed == "" {
-		return fmt.Errorf("hyprctl dispatch produced no result (no `ok`)")
+		return fmt.Errorf("hyprctl dispatch produced no result (expected `ok`)")
 	}
 	return fmt.Errorf("hyprctl dispatch reported: %s", strings.ReplaceAll(trimmed, "\n", "; "))
 }
