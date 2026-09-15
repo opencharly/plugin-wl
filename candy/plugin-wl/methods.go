@@ -762,8 +762,15 @@ func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		// The CHECKED dispatch is mandatory here: an unresolvable selector makes
 		// hyprctl print `hl.focus: window not found` to STDOUT and exit 0, so a
 		// focus that never happened would otherwise be reported as success.
+		//
+		// The selector goes through hyprSelector for the SAME reason the window
+		// actions do (see hyprWindowActionExpr): a bare `target: foot` is what
+		// every bed authors (the wlrctl backend matches it as the app id), but a
+		// bare string matches NOTHING in a Hyprland table — so focus|close|
+		// fullscreen|minimize must normalize uniformly, or a bare focus stays
+		// unmatched on Hyprland while working on sway/labwc.
 		if err := hyprctlDispatchChecked(ctx, ex,
-			fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(in.Target))); err != nil {
+			fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector(in.Target)))); err != nil {
 			return "", fmt.Errorf("focusing window %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Focused window matching %q", in.Target), nil

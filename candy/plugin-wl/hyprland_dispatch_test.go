@@ -1,6 +1,7 @@
 package wl
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,30 @@ func TestHyprSelectorNormalization(t *testing.T) {
 		if got := hyprSelector(explicit); got != explicit {
 			t.Fatalf("explicit selector %q must pass through unchanged, got %q", explicit, got)
 		}
+	}
+}
+
+// TestHyprFocusSelectorIsNormalized pins the UNIFORMITY of the bare-target
+// normalization across ALL FOUR Hyprland window verbs.
+//
+// A regression this test exists for: after the window ACTIONS were routed through
+// hyprSelector, `wl: focus` still dispatched `hl.dsp.focus({window = <raw
+// target>})` — so a bare `target: foot` matched nothing on Hyprland for focus
+// alone, while working for close/fullscreen/minimize. On Hyprland a bare string
+// matches no window in ANY of the four; the normalization must be uniform, or a
+// bed's `target: foot` behaves differently per verb. The focus path builds its
+// own expression (a `focus` TABLE, not the window-action tables), so it needs its
+// own assertion — the action test cannot cover it.
+func TestHyprFocusSelectorIsNormalized(t *testing.T) {
+	// The exact expression wlFocus sends (mirrors methods.go's focus arm).
+	expr := fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector("foot")))
+	if !strings.Contains(expr, `"class:foot"`) {
+		t.Fatalf("wl: focus must normalize a bare target to class:, got %q", expr)
+	}
+	// An explicit selector must still pass through untouched.
+	expr = fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector("initialtitle:foo")))
+	if !strings.Contains(expr, `"initialtitle:foo"`) {
+		t.Fatalf("wl: focus must pass an explicit selector through, got %q", expr)
 	}
 }
 
