@@ -1,7 +1,6 @@
 package wl
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -74,15 +73,21 @@ func TestHyprSelectorNormalization(t *testing.T) {
 // own expression (a `focus` TABLE, not the window-action tables), so it needs its
 // own assertion — the action test cannot cover it.
 func TestHyprFocusSelectorIsNormalized(t *testing.T) {
-	// The exact expression wlFocus sends (mirrors methods.go's focus arm).
-	expr := fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector("foot")))
-	if !strings.Contains(expr, `"class:foot"`) {
-		t.Fatalf("wl: focus must normalize a bare target to class:, got %q", expr)
+	// Assert on hyprFocusExpr — the builder wlFocus actually DISPATCHES, so this
+	// fails if the focus arm stops normalizing (a test that rebuilt the string
+	// locally would not: it would only react to hyprSelector, already pinned by
+	// TestHyprSelectorNormalization).
+	if got := hyprFocusExpr("foot"); !strings.Contains(got, `"class:foot"`) {
+		t.Fatalf("wl: focus must normalize a bare target to class:, got %q", got)
 	}
 	// An explicit selector must still pass through untouched.
-	expr = fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector("initialtitle:foo")))
-	if !strings.Contains(expr, `"initialtitle:foo"`) {
-		t.Fatalf("wl: focus must pass an explicit selector through, got %q", expr)
+	if got := hyprFocusExpr("initialtitle:foo"); !strings.Contains(got, `"initialtitle:foo"`) {
+		t.Fatalf("wl: focus must pass an explicit selector through, got %q", got)
+	}
+	// And the focus TABLE key is `window` (not `selector`), the shape Hyprland
+	// requires — a wrong key returns nil silently.
+	if got := hyprFocusExpr("foot"); !strings.HasPrefix(got, `hl.dsp.focus({window = `) {
+		t.Fatalf("focus expression must use the focus table's `window` key, got %q", got)
 	}
 }
 

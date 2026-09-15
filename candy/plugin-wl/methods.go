@@ -768,9 +768,10 @@ func wlFocus(ctx context.Context, ex *sdk.Executor, in *params.WlInput) (string,
 		// every bed authors (the wlrctl backend matches it as the app id), but a
 		// bare string matches NOTHING in a Hyprland table — so focus|close|
 		// fullscreen|minimize must normalize uniformly, or a bare focus stays
-		// unmatched on Hyprland while working on sway/labwc.
-		if err := hyprctlDispatchChecked(ctx, ex,
-			fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector(in.Target)))); err != nil {
+		// unmatched on Hyprland while working on sway/labwc. The expression is
+		// built by hyprFocusExpr so the normalization is assertable WITHOUT a live
+		// compositor (the same shape as hyprWindowActionExpr).
+		if err := hyprctlDispatchChecked(ctx, ex, hyprFocusExpr(in.Target)); err != nil {
 			return "", fmt.Errorf("focusing window %q via hyprctl: %w", in.Target, err)
 		}
 		return fmt.Sprintf("Focused window matching %q", in.Target), nil
@@ -1190,6 +1191,19 @@ func hyprDispatchOutcome(out string) error {
 // additional table fields such as `mode = 1` or `workspace = …`.
 func hyprctlWindowAction(ctx context.Context, ex *sdk.Executor, selector, action string, extra ...string) error {
 	return hyprctlDispatchChecked(ctx, ex, hyprWindowActionExpr(selector, action, extra...))
+}
+
+// hyprFocusExpr builds the Lua dispatcher expression that focuses `target` via
+// the focus TABLE's `window` key, normalizing a bare target with hyprSelector.
+//
+// It is the focus verb's peer of hyprWindowActionExpr (the window actions carry
+// the selector in their own tables; focus has a DIFFERENT table — `hl.dsp.focus`
+// takes `window`, not `selector`). Extracting it makes the focus arm's
+// normalization assertable without a live compositor: a test on THIS builder
+// fails if the focus arm ever stops normalizing, which an inline
+// `fmt.Sprintf` in wlFocus would not catch.
+func hyprFocusExpr(target string) string {
+	return fmt.Sprintf("hl.dsp.focus({window = %s})", luaQuote(hyprSelector(target)))
 }
 
 // hyprWindowActionExpr builds the Lua dispatcher expression that aims a window
