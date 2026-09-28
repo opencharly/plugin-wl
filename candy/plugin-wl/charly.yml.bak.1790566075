@@ -1,5 +1,7 @@
+version: 2026.232.0520
 plugin-wl:
     candy:
+        version: 2026.253.1600
         description: |-
             OUT-OF-TREE charly plugin serving the `wl` live-container check verb — a standalone
             Go module (go.mod + main.go) that drives Wayland/sway desktop automation inside a
@@ -51,6 +53,7 @@ plugin-wl:
                 - contains: 'capability:'
               context:
                 - runtime
+
 wl-skill:
     skill:
         name: wl
@@ -58,6 +61,7 @@ wl-skill:
         owner: plugin-wl
         description: |-
             Wayland desktop automation — the `wl:` check verb (screenshots, click/type/scroll/drag, window management, clipboard, resolution control, AT-SPI2 introspection, window geometry), its nested `wl: sway-*` / `wl: overlay-*` methods, or `wl:` declarative steps inside `check:`/`run:` blocks. Served out-of-process by candy/plugin-wl; covers sway-desktop and selkies-desktop automation on sway, labwc, AND KWin.
+
         content: |
             # WL - Wayland Desktop Automation
 
@@ -551,6 +555,7 @@ wl-skill:
             - `/charly-selkies:xterm` — X11 terminal for XWayland testing
             - `/charly-selkies:sway-desktop` — Desktop metalayer (wl-tools + wl-screenshot-grim)
             - `/charly-selkies:selkies-desktop-layer` — Desktop metalayer (wl-tools + wl-screenshot-pixelflux + a11y-tools + xterm)
+
 wl-overlay-skill:
     skill:
         name: wl-overlay
@@ -558,6 +563,7 @@ wl-overlay-skill:
         owner: plugin-wl
         description: |-
             Fullscreen Wayland overlays for screen recordings via gtk4-layer-shell — the `wl: overlay-*` methods, recording overlays, title cards, lower-thirds, countdowns, or fade transitions.
+
         content: |
             # WL Overlay -- Wayland Desktop Overlays for Recording
 
