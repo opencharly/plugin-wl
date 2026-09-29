@@ -66,8 +66,9 @@ the host**, not in the venue.
   `compositor.go` (per-compositor routing), `hyprland_layers.go`, `atspi.go`,
   `provider.go` / `plugin.go`, `schema/wl.cue` (the self-contained `#WlInput`),
   `params/cue_types_gen.go`, `cmd/serve/main.go`.
-- `charly.yml` — the root project manifest (`discover: candy` + the `wl-skill`
-  and `wl-overlay-skill` skill entities).
+- `charly.yml` — the root project manifest (`discover: candy` only); the
+  `wl-skill` and `wl-overlay-skill` `skill:` entities live in the candy manifest
+  `candy/plugin-wl/charly.yml`.
 - `.github/workflows/tag-on-merge.yml` — CalVer tag + `CHANGELOG/` on merge.
 
 ## Related

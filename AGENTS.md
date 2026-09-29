@@ -3,11 +3,13 @@
 Standalone plugin repo for the `wl` live-container check verb (`verb:wl`). The
 plugin is a Go module at `candy/plugin-wl/` (module path
 `github.com/opencharly/plugin-wl/candy/plugin-wl`); the root `charly.yml`
-declares `discover: candy` **and** the `wl-skill` + `wl-overlay-skill` `skill:`
-entities (the corpus sources for `/charly-check:wl` and `/charly-check:wl-overlay`).
+declares `discover: candy` so the repo is a project, and the candy manifest
+carries the `wl-skill` + `wl-overlay-skill` `skill:` entities (the corpus
+sources for `/charly-check:wl` and `/charly-check:wl-overlay`).
 
 Canonical files:
 
+- `charly.yml` — the root project manifest (`discover: candy` only).
 - `candy/plugin-wl/charly.yml` — the `plugin-wl:` candy entity (`plugin:` block,
   `plan:` check) + the two skill entities.
 - `candy/plugin-wl/methods.go` — the method surface.
