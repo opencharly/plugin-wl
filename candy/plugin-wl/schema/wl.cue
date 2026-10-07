@@ -3,10 +3,10 @@
 // SOURCE for this plugin's params, used two ways (the same contract core `spec`
 // and the reference plugin-http use):
 //
-//  1. GENERATE the Go param struct — `cue exp gengotypes` (driven by task cue:gen,
-//     which wraps this with `package params` + `@go(params)`) emits
-//     ../params/cue_types_gen.go, so the provider decodes plugin_input into a TYPED
-//     struct, never a hand-parsed map.
+//  1. GENERATE the Go param struct — the schema→Go pipeline concatenates this file
+//     under a `package params` + `@go(params)` header and generates the Go struct from
+//     it, writing ../params/cue_types_gen.go, so the provider decodes plugin_input into
+//     a TYPED struct, never a hand-parsed map. Never hand-edit the generated file.
 //  2. VALIDATE authored input AT RUNTIME — the host splices this source onto the
 //     base (base ++ plugin) and validates every authored `wl` step's plugin_input
 //     against #WlInput.
