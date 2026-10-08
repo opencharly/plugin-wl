@@ -7,10 +7,10 @@ package params
 // SOURCE for this plugin's params, used two ways (the same contract core `spec`
 // and the reference plugin-http use):
 //
-//  1. GENERATE the Go param struct — `cue exp gengotypes` (driven by task cue:gen,
-//     which wraps this with `package params` + `@go(params)`) emits
-//     ../params/cue_types_gen.go, so the provider decodes plugin_input into a TYPED
-//     struct, never a hand-parsed map.
+//  1. GENERATE the Go param struct — the schema→Go pipeline concatenates this file
+//     under a `package params` + `@go(params)` header and generates the Go struct from
+//     it, writing ../params/cue_types_gen.go, so the provider decodes plugin_input into
+//     a TYPED struct, never a hand-parsed map. Never hand-edit the generated file.
 //  2. VALIDATE authored input AT RUNTIME — the host splices this source onto the
 //     base (base ++ plugin) and validates every authored `wl` step's plugin_input
 //     against #WlInput.
@@ -50,8 +50,9 @@ type WlInput struct {
 	// text — text to type / the clipboard payload / the overlay text / the exec-adjacent text.
 	Text string `yaml:"text,omitempty" json:"text,omitempty"`
 
-	// scale — the ocr capture scale (0 = the native resolution; 2 = the upstream
-	// screen_contains small-caption fix).
+	// scale is the ocr capture scale (the upstream screen_contains 2x small-caption
+	// fix). 0/absent captures at the native resolution — the large-text venues
+	// (the omarchy shell surfaces) read best there.
 	Scale int `yaml:"scale,omitempty" json:"scale,omitempty"`
 
 	// key — a named XKB key for `key` (wtype -k).
