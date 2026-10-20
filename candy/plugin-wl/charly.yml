@@ -57,14 +57,8 @@ wl-skill:
         name: wl
         family: check
         owner: plugin-wl
-        description: |-
-            Wayland desktop automation — the `wl:` check verb (screenshots, click/type/scroll/drag, window management, clipboard, resolution control, AT-SPI2 introspection, window geometry), its nested `wl: sway-*` / `wl: overlay-*` methods, or `wl:` declarative steps inside `check:`/`run:` blocks. Served out-of-process by candy/plugin-wl; covers sway-desktop and selkies-desktop automation on sway, labwc, AND KWin.
-
 wl-overlay-skill:
     skill:
         name: wl-overlay
         family: check
         owner: plugin-wl
-        description: |-
-            Fullscreen Wayland overlays for screen recordings via gtk4-layer-shell — the `wl: overlay-*` methods, recording overlays, title cards, lower-thirds, countdowns, or fade transitions.
-
