@@ -1,0 +1,501 @@
+---
+name: wl
+description: 'Wayland desktop automation — the `wl:` check verb (screenshots, click/type/scroll/drag,
+  window management, clipboard, resolution control, AT-SPI2 introspection, window
+  geometry), its nested `wl: sway-*` / `wl: overlay-*` methods, or `wl:` declarative
+  steps inside `check:`/`run:` blocks. Served out-of-process by candy/plugin-wl; covers
+  sway-desktop and selkies-desktop automation on sway, labwc, AND KWin.'
+---
+
+# WL - Wayland Desktop Automation
+
+## Overview
+
+The `wl:` check verb is the unified desktop automation verb for wlroots compositors (sway, labwc), **Hyprland**, **and KWin (KDE Plasma)**. It is **NOT a host `charly check` subcommand** — it is a declarative check verb served out-of-process by its plugin (`candy/plugin-wl`), parallel to the `cdp:`/`vnc:`/`dbus:` plugin verbs. Author a `wl:` step in a candy/box plan and run it against a live deployment with `charly check live <image> --filter wl`. It provides screenshots, input (click, type, key combos, scroll, drag), window management, clipboard, resolution control, accessibility introspection (AT-SPI2), and window geometry queries. Works on sway-desktop, selkies-desktop (labwc), selkies-kde-desktop (KWin), and cstream-desktop (nested Hyprland) images.
+
+**Served out-of-process — no host CLI subcommand.** The host dispatches the `wl:` verb through the provider registry exactly like a built-in (`ResolveVerb("wl")` → the out-of-process gRPC provider → `Provider.Invoke` with the full `Op`), and the plugin drives the running container's compositor. Authoring is unchanged from a built-in verb: you write `wl: screenshot`, never `plugin: wl`.
+
+**Per-compositor routing.** The plugin's `detectCompositor` picks the backend per method. On wlroots: `wlrctl` (pointer + `wlrctl toplevel` window management), `wlr-randr` (resolution). On **KWin**: window management (toplevel/windows/focus/close/fullscreen/minimize/geometry) via **`kdotool`** (KWin scripting) + screenshot via `pixelflux`; `status` reports `compositor: kwin`. KWin **keyboard** (type/key — `wtype` needs `zwp_virtual_keyboard_manager_v1`), **clipboard** (`wl-clipboard` needs `wlr-data-control`), **pointer** (click/double-click/mouse/scroll/drag) and **resolution** (`wlr-randr` needs `wlr-output-management`) have NO KWin backend — those wlroots protocols are unimplemented by KWin — so plugin-wl returns a clear "unsupported on KWin" error (not a hang). Proven live on `check-selkies-kde-pod`: `wl: status` → `compositor: kwin`. On **Hyprland**: window management and resolution route through **`hyprctl`** (`wl: status` reports `window=hyprctl resolution=hyprctl`), while pointer, keyboard and clipboard keep their wlroots backends — Hyprland implements all six protocols the tooling needs. See the Compositor Compatibility table below.
+
+### Authoring a `wl:` step
+
+Each method is the declarative `wl:` step you author — an ordered list item under the candy/box `plan:`. The method name is the scalar value for a bare-method step (`wl: screenshot`), or the `method:` key of the `wl:` map when the step carries wl-exclusive fields (`x:`, `y:`, `x2:`, `y2:`, `button:`, `text:`, `key:`, `combo:`, `direction:`, `amount:`, `target:`, `action:`, `query:`, `command:`, `artifact:` and the artifact validators) — those live INSIDE the `wl:` map. Only the shared matchers (`stdout:`, `stderr:`, `exit_status:`) and `context:`/`id:`/`timeout:` stay siblings. Nested methods are hyphenated: `wl: overlay-show`, `wl: sway-tree`, `wl: sway-workspaces`. A query is a `check:` step; a side-effect action (click/type/exec/…) is a `run:` step. All `wl:` steps are **deploy-context only** (they need a running deployment), so author them with `context: [deploy]`. See `/charly-check:check` for the full method allowlist. Example:
+
+```yaml
+- check: a non-empty desktop screenshot is captured
+  context: [deploy]
+  wl:
+    method: screenshot
+    artifact: /tmp/desktop.png
+    artifact_min_bytes: 10000
+```
+
+## Quick Reference
+
+| Action | Declarative step | Description |
+|--------|------------------|-------------|
+| Screenshot | `wl: screenshot` + `artifact:` | Capture desktop as PNG via grim; assert on it with the artifact validators below |
+| Click | `wl: click` + `x:` + `y:` | Click at absolute coordinates via wlrctl |
+| Double-click | `wl: double-click` + `x:` + `y:` | Double-click with configurable delay |
+| Type text | `wl: type` + `text:` | Send keyboard input via wtype |
+| Send key | `wl: key` + `key:` | Press a named key via wtype |
+| Key combo | `wl: key-combo` + `combo:` | Send key combination (ctrl+c, alt+tab) |
+| Move mouse | `wl: mouse` + `x:` + `y:` | Move pointer to absolute coordinates |
+| Scroll | `wl: scroll` + `x:` + `y:` + `direction:` | Scroll at coordinates (up/down/left/right) |
+| Drag | `wl: drag` + `x:` + `y:` + `x2:` + `y2:` | Drag between coordinates (experimental) |
+| List windows | `wl: windows` | List windows (wlrctl toplevel, xdotool fallback) |
+| List toplevel | `wl: toplevel` | List Wayland toplevel windows via wlrctl |
+| Focus window | `wl: focus` + `target:` | Focus window (wlrctl toplevel, xdotool fallback) |
+| Close window | `wl: close` + `target:` | Close window via wlrctl toplevel |
+| Fullscreen | `wl: fullscreen` + `target:` | Toggle fullscreen via wlrctl toplevel |
+| Minimize | `wl: minimize` + `target:` | Toggle minimize via wlrctl toplevel |
+| Launch app | `wl: exec` + `command:` | Launch an app DETACHED — see the note below on when NOT to use it |
+| Resolution | `wl: resolution` + `target:` | Set output resolution via wlr-randr |
+| Clipboard | `wl: clipboard` + `action:` (+ `text:` for set) | Read/write Wayland clipboard (get/set/clear) |
+| Window props | `wl: xprop` + `target:` | Query X11 window properties |
+| Window rect | `wl: geometry` + `target:` | Get window position/size as JSON |
+| A11y tree | `wl: atspi` + `action: tree` | Dump accessibility tree as JSON |
+| A11y find | `wl: atspi` + `action: find` + `query:` | Find elements by name/role |
+| A11y click | `wl: atspi` + `action: click` + `query:` | Click element by name/role |
+| Status | `wl: status` | Check all tool availability |
+| Overlay show | `wl: overlay-show` (+ overlay fields) | Show recording overlay (see `/charly-check:wl-overlay`) |
+| Overlay hide | `wl: overlay-hide` | Remove overlays |
+
+Every `+ <field>:` entry is a key INSIDE the `wl:` map (`wl: {method: scroll, x: …, y: …, direction: down}`);
+only `stdout:`/`stderr:`/`exit_status:` and `context:`/`id:`/`timeout:` are siblings.
+
+Run a candy's baked `wl:` steps against a live deployment with
+`charly check live <image> --filter wl` (add `-i <instance>` for multi-instance).
+
+### `wl: exec` launches; it does not run-and-wait
+
+`exec` detaches the process (`setsid`) and redirects its streams to `/dev/null`. That
+is exactly right for what it exists for — a GUI app that maps a window and keeps
+running — and exactly wrong for a fast state change.
+
+Two consequences worth knowing before authoring:
+
+- **It returns immediately, before the command has done anything.** Assert the EFFECT
+  afterwards (a window appears, a layer maps) with `eventually:`, never the exec step
+  alone.
+- **It discards the command's output and exit status.** A launch that fails silently
+  looks identical to one that succeeded. So for a short command whose exit status IS
+  the assertion — a toggle, a config write, an IPC call — use the `command:` verb
+  instead, which waits and reports. A bed that used `wl: exec` for a bar toggle had
+  the toggle silently not land, and the failure surfaced two steps later against
+  unrelated state.
+
+The streams are redirected for a mechanical reason, not tidiness: a backgrounded child
+that inherits stdout keeps the capture pipe open, so the verb blocks for its whole
+deadline on a process that never exits. Before that was fixed, launching a terminal
+reported `DeadlineExceeded` while the very next step found its window mapped. The same
+applies to `wl: clipboard set` — `wl-copy` stays alive to own the Wayland selection.
+
+## Asserting on a screenshot: the artifact validators
+
+`wl: screenshot` writes a PNG to `artifact:`. On its own that proves only that grim
+exited — the shared SDK artifact pipeline is what turns the file into an assertion.
+Five validators, authored INSIDE the `wl:` map alongside `artifact:`:
+
+| Validator | Asserts |
+|---|---|
+| `artifact_min_bytes:` | the file is at least N bytes |
+| `artifact_min_dimensions:` | the decoded image is at least `WxH` |
+| `artifact_not_uniform:` | the image is not one flat colour |
+| `artifact_min_cast_events:` | (asciicast artifacts) at least N events |
+| `artifact_contains_text:` | **OCR reads this text out of the image**, case-insensitively |
+
+They are a LADDER, not alternatives — each rules out a different way a capture can be
+worthless, and only the last proves the desktop DREW anything. `min_bytes` passes on a
+blank PNG. `not_uniform` passes on a wallpaper with every panel missing.
+`contains_text` fails unless the pixels actually spell something.
+
+That matters most for layer-shell surfaces: `hypr-layers` can report a surface
+present, correctly sized and on screen while it renders nothing, so a bed asserting
+presence alone will pass a shell that came up broken. Pair them.
+
+```yaml
+- check: the weather panel surface is mapped
+  context: [deploy]
+  wl: hypr-layers
+  stdout:
+    - contains: omarchy-keyboard-panel
+
+- check: the weather panel actually renders its location
+  context: [deploy]
+  wl:
+    method: screenshot
+    artifact: /tmp/weather.png
+    artifact_min_bytes: 10000
+    artifact_contains_text: SAN FRANCISCO
+```
+
+### `artifact_contains_text:` needs an OCR engine ON THE HOST
+
+The validators run host-side on the pulled artifact, not in the venue — so `tesseract`
+plus a language pack must be where `charly` runs, NOT in the image under test. charly
+declares both as OPTIONAL package dependencies (`tesseract` + `tesseract-data-eng` on
+arch, `tesseract-ocr` + `tesseract-ocr-eng` on deb), because only beds authoring this
+modifier need them.
+
+**A missing engine or language pack is an ERROR, never a no-match.** With no language
+data tesseract writes its complaint to stderr and exits with EMPTY stdout — which is
+indistinguishable from "the text is not on screen" to anything reading stdout alone.
+The validator checks stderr first and names the cause, so a broken OCR setup says so
+instead of silently failing every assertion as though the desktop were blank.
+
+The image is enlarged before OCR: tesseract wants roughly document resolution and a
+desktop capture is screen resolution. Measured on a 1280x800 capture whose bar reads
+`Monday 10:52` plainly to a human, tesseract returned ZERO words at native size and
+read the clock correctly once enlarged. Sparse-text segmentation is used, because a
+desktop is scattered labels rather than a page of prose.
+
+## Compositor Compatibility
+
+Backend availability per compositor (the plugin routes each method to the available one):
+
+| Tool | Protocol | sway | labwc (selkies) | KWin (KDE Plasma) | Hyprland (cstream) |
+|------|----------|------|-----------------|-------------------|--------------------|
+| grim | wlr-screencopy | YES | NO (nested compositor) | NO | YES — but `enforce_permissions` denies screencopy per binary, so it needs an `hl.permission` grant |
+| pixelflux-screenshot | pixelflux API | NO | YES | YES | NO |
+| wtype | zwp_virtual_keyboard_v1 | YES | YES | NO — fail-fast (KWin lacks the protocol) | YES |
+| wlrctl pointer | wlr-virtual-pointer | YES | YES | NO — pointer unsupported on KWin | protocol present (`wl: status` → `pointer=yes`); not exercised in-bed |
+| wlrctl toplevel | wlr-foreign-toplevel-management | YES | YES | NO — window mgmt via `kdotool` | NO — window mgmt routes through `hyprctl` Lua dispatchers |
+| kdotool | KWin scripting (D-Bus) | NO | NO | YES (toplevel/focus/close/fullscreen/minimize/geometry) | NO |
+| wlr-randr | wlr-output-management | YES | YES | NO — resolution unsupported on KWin | routed to `hyprctl`; **must not be used** on a GWD-driven output — see below |
+| wl-copy/paste | wlr-data-control | YES | YES | NO — fail-fast (KWin lacks wlr-data-control) | YES |
+| xdotool | X11 (XWayland) | YES | YES (on-demand) | YES (on-demand) | XWayland installed; not exercised |
+| swaymsg | i3 IPC | YES | NO | NO | NO |
+
+**KWin (selkies-kde-desktop) notes.** On a headless rootless nested KWin pod the
+wlroots-backed `wl:` tools do NOT work — KWin implements none of the wlroots
+protocols they need, so `wtype` (keyboard), `wl-clipboard` (clipboard), and
+`wlr-randr` (resolution) each HANG. `plugin-wl` is therefore **compositor-aware**
+(`detectCompositor`): on KWin it routes **status** (`compositor: kwin`),
+**screenshot** (`pixelflux`), and **window management** (toplevel/windows/focus/
+close/fullscreen/minimize/geometry) through **`kdotool`** (KWin's D-Bus scripting),
+and fail-fasts the wlroots paths with a clear "unsupported on KWin" error instead of
+hanging. Pointer (click/double-click/mouse/scroll/drag) likewise has no host-safe
+backend (`org_kde_kwin_fake_input` removed in KWin 6, RemoteDesktop portal
+approval-gated, `/dev/uinput` leaks into the host) and returns the same clear error.
+PROVEN live on `check-selkies-kde-pod`: the `wl-verb-dispatches` probe passes
+(`wl: status` → `compositor: kwin`) alongside the desktop-ready + frame-not-black
+stream coverage the labwc flavor also asserts. (The KDE session itself is a
+`kwin_wayland --wayland-display wayland-1` nested compositor — see
+`/charly-selkies:selkies-kde-desktop` "De-SDDM".)
+
+**Hyprland (cstream-desktop) notes.** Hyprland implements all six wlroots protocols the
+`wl:` tooling needs, so unlike KWin nothing fail-fasts — but two methods route differently
+and one carries a hazard.
+
+*Routing.* `wl: status` reports `window=hyprctl resolution=hyprctl pointer=yes keyboard=yes
+clipboard=yes`. Window management does NOT go through `wlrctl toplevel`; it goes through
+Hyprland's Lua dispatchers (`hl.dsp.*`), because Hyprland >= 0.55 replaced the legacy string
+dispatchers with Lua. Keyboard (`wtype`), clipboard (`wl-clipboard`) and pointer keep their
+wlroots backends.
+
+*Screenshots need a permission grant.* The session sets `ecosystem.enforce_permissions = true`,
+which gates screencopy PER BINARY. Without an explicit
+`hl.permission("/usr/(bin|local/bin)/grim", "screencopy", "allow")` every capture is denied — so
+`wl: screenshot` fails on an otherwise healthy compositor.
+
+*Do NOT use `wl: resolution` on a GWD-driven output.* On a cstream desktop the streamer owns the
+output size, so changing it out-of-band makes the compositor and the encoder disagree with NO
+error anywhere: measured once with both at 640x480, a `wl: resolution 1280x720` moved the
+compositor to 1280x720 while the streamer's capsfilter stayed at 640x480. Resize must go through
+the cstream control socket. This is a second-writer hazard, not a backend gap — it applies
+whichever tool performs the write.
+
+*Selectors.* Use `address:` from `hl.get_windows()`, or `initialtitle:`. Plain `title:` is
+unreliable for automation: a terminal rewrites its title after mapping, so the selector stops
+matching and Hyprland answers `hl.focus: window not found`.
+
+PROVEN live on `check-cstream-pod`, each action paired with an observation rather than an absence
+of error: `wl: type` + `wl: key Return` (the typed line RAN — the process exists), `wl: key-combo
+ctrl+c` (the process is GONE), `wl: focus` both ways between two mapped windows, `wl: minimize`
+(the window really moved to `special:minimized`), `wl: close` targeting a NAMED window while the
+focused one survives, a clipboard set/get round-trip asserting the value returns exactly, a
+non-uniform `wl: screenshot`, and a keymap switch to `de` that the compositor then reports.
+
+**Coordinates.** The `wl:` verb takes **desktop-absolute** `x:`/`y:`. To click an
+element located by CSS selector, read its desktop coordinates from a `cdp: coords`
+step (it reports both viewport and desktop coords) and author the `wl: click` with
+those `x:`/`y:` — see "CDP → WL Bridge" below.
+
+## Architecture
+
+```
+host (charly check live --filter wl)
+   -> resolve the venue (engine + container name)
+   -> Op + venue handed to candy/plugin-wl over gRPC
+candy/plugin-wl
+   -> exec into the container: export WAYLAND_DISPLAY=… && <tool command>
+   -> capture stdout (screenshot/query) or run silently (input)
+```
+
+The plugin `exec`s into the container. All tools use native Wayland protocols — no daemon, no `/dev/uinput`, no VNC server required.
+
+## Requirements
+
+- Container must include `wl-tools` layer (wtype, wlrctl, wl-clipboard, wlr-randr, xdotool, ydotool)
+- For screenshots: `wl-screenshot-grim` (sway) or `wl-screenshot-pixelflux` (selkies)
+- Container must have a running Wayland compositor (sway, labwc, etc.)
+- For AT-SPI2: `a11y-tools` layer (python3-pyatspi, python3-gobject) + `dbus` layer
+- For XWayland: an X11 app like `xterm` must be running to trigger XWayland start on labwc
+- Included in `sway-desktop` and `selkies-desktop` metalayers
+
+## Methods
+
+Each method below is a `wl:` plan step authored with `context: [deploy]`; run a
+candy's baked steps with `charly check live <image> --filter wl` (add
+`-i <instance>` for a specific instance).
+
+### Key Combo
+```yaml
+- run: send a key combination
+  context: [deploy]
+  wl:
+    method: key-combo
+    combo: ctrl+shift+t        # also ctrl+c, alt+tab, super+l
+```
+
+Modifiers: `ctrl`/`control`, `alt`, `shift`, `super`/`win`/`logo`, `meta`. Uses `wtype -M`.
+
+### Scroll
+```yaml
+- run: scroll down at the desktop center
+  context: [deploy]
+  wl:
+    method: scroll
+    x: 960
+    y: 540
+    direction: down            # up/down/left/right
+```
+
+Uses xdotool click 4/5/6/7 (X11 scroll buttons) for XWayland windows. Falls back to wtype Page_Up/Page_Down.
+
+### Drag (Experimental)
+```yaml
+- run: drag from one point to another
+  context: [deploy]
+  wl:
+    method: drag
+    x: 100
+    y: 100
+    x2: 400                    # end coordinates
+    y2: 300
+```
+
+Requires XWayland (uses `xdotool mousemove + mousedown/mouseup`).
+
+### Window Management (wlrctl toplevel)
+```yaml
+- run: focus a window by title
+  context: [deploy]
+  wl:
+    method: focus
+    target: Chrome             # also close / fullscreen / minimize via the matching method
+- run: launch a terminal in the container
+  context: [deploy]
+  wl:
+    method: exec
+    command: foot              # exec's argv rides wl's `command:` field
+```
+
+`wl: toplevel` lists all windows; `wl: close` / `wl: fullscreen` / `wl: minimize` take the same `target:`.
+
+### Resolution
+```yaml
+- run: set the output resolution
+  context: [deploy]
+  wl:
+    method: resolution
+    target: 1920x1080          # auto-detect output
+```
+
+### Clipboard
+```yaml
+- run: write the Wayland clipboard
+  context: [deploy]
+  wl:
+    method: clipboard
+    action: set
+    text: hello
+```
+
+`action: get` reads the clipboard; `action: clear` clears it.
+
+### Window Geometry
+```yaml
+- check: the window geometry is reported
+  context: [deploy]
+  wl:
+    method: geometry
+    target: Chrome             # returns JSON: {"x":0,"y":0,"width":1920,"height":1080}
+- check: the active window's X11 properties are reported
+  context: [deploy]
+  wl: xprop
+```
+
+### AT-SPI2 Accessibility
+```yaml
+- check: the accessibility tree is dumped
+  context: [deploy]
+  wl:
+    method: atspi
+    action: tree               # dump full accessibility tree as JSON
+- run: click an element by name AND role
+  context: [deploy]
+  wl:
+    method: atspi
+    action: click
+    query: "Save:button"       # name / role / "name:role"
+```
+
+Requires `a11y-tools` layer. Chrome needs `--force-renderer-accessibility` flag.
+
+### CDP → WL Bridge
+
+Locate an element's viewport coords with the `cdp: coords` verb (CSS selector in
+Chrome) — it reports both the viewport and the desktop center — then deliver the
+click with a `wl: click` step at the reported desktop `x:`/`y:` (wlrctl pointer —
+critical for selkies-desktop which has no VNC):
+
+```yaml
+- check: the submit button is located
+  context: [deploy]
+  cdp:
+    method: coords
+    tab: "1"
+    selector: "#submit-button"
+- run: deliver the click via the wl pointer at the reported desktop center
+  context: [deploy]
+  wl:
+    method: click
+    x: 640
+    y: 360
+```
+
+## Sway-Specific Methods (`wl: sway-*`)
+
+The sway IPC methods are the hyphenated `wl: sway-*` methods. They require a sway
+compositor (swaymsg) and error on labwc.
+
+```yaml
+- check: the sway window tree is reported
+  context: [deploy]
+  wl: sway-tree
+- run: run any swaymsg command
+  context: [deploy]
+  wl:
+    method: sway-msg
+    command: focus left        # sway-msg's argv rides wl's `command:` field
+```
+
+Other sway methods: `wl: sway-workspaces` / `sway-outputs` (JSON queries),
+`sway-focus` / `sway-move` / `sway-resize` / `sway-kill` / `sway-floating` /
+`sway-layout` / `sway-workspace` (window/workspace control via `target:`),
+and `sway-reload` (reload sway config).
+
+## Hyprland-Specific Methods (`wl: hypr-*`)
+
+The Hyprland IPC methods are the hyphenated `wl: hypr-*` methods. They require a
+running Hyprland (hyprctl) and error elsewhere. The plugin recovers
+`HYPRLAND_INSTANCE_SIGNATURE` from `$XDG_RUNTIME_DIR/hypr` itself — it is absent
+from Hyprland's own `/proc/<pid>/environ`, so a bare env probe finds nothing.
+
+```yaml
+- check: the compositor reports at least one monitor
+  context: [deploy]
+  wl: hypr-monitors
+  stdout: {contains: '"name"'}
+- run: close a window through the Lua dispatcher
+  context: [deploy]
+  wl:
+    method: hypr-dispatch
+    command: hl.dsp.window.close({ window = "class:foot" })
+```
+
+`hypr-monitors` / `hypr-clients` / `hypr-workspaces` return `hyprctl -j` JSON
+verbatim; `hypr-systeminfo` returns text. `hypr-dispatch` and `hypr-eval` take a
+**Lua** expression on `command:` — Hyprland >= 0.55 replaced the legacy string
+dispatchers, and the old form (`closewindow title:foo`) is rejected outright.
+There is deliberately no `hypr-keyword`: on a Lua-config Hyprland `hyprctl
+keyword` refuses while still exiting 0, which would pass a check while changing
+nothing. Use `hypr-eval`.
+
+### `wl: hypr-layers` — layer-shell surfaces, with an on-screen verdict
+
+`hypr-clients`, `toplevel` and `windows` see only TOPLEVEL windows. On a
+Quickshell/wlroots desktop the bar, notification popups, launcher, OSD, wallpaper
+and lockscreen are none of them toplevels — they are `zwlr_layer_shell_v1`
+surfaces, invisible to every other method. `hypr-layers` is how a bed asserts
+they exist.
+
+It does not forward `hyprctl -j layers` verbatim, because that is not enough to
+write a check against: a layer surface can be MAPPED but parked outside the
+monitor, which is exactly how a hidden bar is implemented (unmapping would force
+the surface to be rebuilt on reveal). Shown and hidden are the same JSON except
+for coordinates. So the method correlates the surfaces against monitor geometry —
+scale-divided, and axis-swapped on an odd `transform` — and emits one
+tab-separated record per surface ending in `onscreen`, `offscreen` or `unknown`:
+
+```
+omarchy-bar         HEADLESS-1  0  0    1920  40    onscreen
+omarchy-background  HEADLESS-1  0  0    1920  1080  onscreen
+omarchy-bar         HEADLESS-1  0  -40  1920  40    offscreen
+```
+
+which makes each assertion one matcher:
+
+```yaml
+- check: the bar surface exists
+  context: [deploy]
+  wl: hypr-layers
+  stdout: {contains: omarchy-bar}
+- check: the bar is actually visible, not parked off-screen
+  context: [deploy]
+  eventually: 30s
+  wl: hypr-layers
+  stdout: {matches: 'omarchy-bar\s.*\sonscreen'}
+- check: hiding the bar parks it without unmapping it
+  context: [deploy]
+  eventually: 15s
+  wl: hypr-layers
+  stdout: {matches: 'omarchy-bar\s.*\soffscreen'}
+```
+
+`unknown` means the surface sits on a monitor `hyprctl -j monitors` did not
+report, so no bounds exist to judge it. It matches neither an `onscreen` nor an
+`offscreen` matcher on purpose — the check fails loudly rather than reading a
+guessed verdict as a real one.
+
+## Differences from VNC
+
+| Aspect | `wl:` verb | `vnc:` verb |
+|--------|---------|----------|
+| Compositors | All wlroots (+ sway-* methods) | Requires wayvnc |
+| Transport | exec into container | TCP port 5900 |
+| Window mgmt | wlrctl toplevel + sway IPC | No |
+| Clipboard | wl-copy/paste | rfb cut-text |
+| Remote access | No | Yes (TCP) |
+| NVIDIA headless | Works | Works (pixman + DPMS fix) |
+
+Source: `candy/plugin-wl` (the out-of-process Wayland-automation provider).
+
+## Cross-References
+
+- `/charly-check:check` — parent router; the `wl:` verb catalog entry, the method allowlist, and `charly check live <image> --filter wl`.
+- `/charly-internals:plugin` — the out-of-process provider model that serves `wl` (`candy/plugin-wl`).
+- `/charly-check:vnc` — VNC/RFB protocol alternative via the declarative `vnc:` verb (sibling verb; TCP-based, works remotely).
+- `/charly-check:cdp` — Chrome DevTools Protocol via the declarative `cdp:` verb (sibling verb; DOM-level interaction, `axtree` for accessibility).
+- `/charly-check:dbus` — D-Bus calls and desktop notifications via the declarative `dbus:` verb served out-of-process by `candy/plugin-dbus`.
+- `/charly-selkies:wl-tools` — Compositor-agnostic tools (wtype, wlrctl, wl-clipboard, wlr-randr, xdotool, ydotool)
+- `/charly-check:wl-overlay` — Fullscreen overlays for recordings (title cards, lower-thirds, countdowns, highlights, fades) via the `wl: overlay-*` methods
+- `/charly-selkies:wl-overlay-layer` — Overlay layer (gtk4-layer-shell, python3-gobject)
+- `/charly-selkies:wl-screenshot-grim` — Screenshot layer for sway (grim, wlr-screencopy)
+- `/charly-selkies:wl-screenshot-pixelflux` — Screenshot layer for selkies (pixelflux rendering pipeline)
+- `/charly-selkies:a11y-tools` — AT-SPI2 accessibility (python3-pyatspi, python3-gobject)
+- `/charly-selkies:xterm` — X11 terminal for XWayland testing
+- `/charly-selkies:sway-desktop` — Desktop metalayer (wl-tools + wl-screenshot-grim)
+- `/charly-selkies:selkies-desktop-layer` — Desktop metalayer (wl-tools + wl-screenshot-pixelflux + a11y-tools + xterm)
